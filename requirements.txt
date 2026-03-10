@@ -1,0 +1,5 @@
+python-telegram-bot>=20.0
+requests>=2.31
+ollama>=0.1.7
+portalocker>=2.8        # кросс-платформенные файловые блокировки (Windows + Linux)
+python-dotenv>=1.0

@@ -10,7 +10,6 @@
 SP и PL — гибкие исполнители; дублирование анализа исключено.
 
 Репозиторий: https://github.com/NomelLime/Orchestrator
-Git токен: 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
 
 ---
 

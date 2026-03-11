@@ -5,9 +5,12 @@ main_orchestrator.py — Главный цикл Orchestrator.
         ORC_DRY_RUN=true python main_orchestrator.py  (безопасный режим)
 
 Цикл (раз в CYCLE_INTERVAL_HOURS):
+    0. Ретроспективная оценка изменений за 24ч (evaluator)
     1. Пассивная деградация зон (confidence_score decay)
     2. Обработка команд оператора из Telegram (pending → applied)
     3. Сбор метрик из ShortsProject и PreLend → metrics_snapshots
+    3.5 Проверка краш-лупа агентов SP → автооткат последнего патча
+    3.6 Проверка прокси/баланса (раз в SUPPLY_CHECK_EVERY_N_CYCLES циклов)
     4. LLM-анализ + генерация плана → evolution_plans
     5. Применение config_changes (Zone 1, 2)
     6. Применение code_patches (Zone 4, только Python/SP)
@@ -30,7 +33,7 @@ import portalocker
 import config
 from db.connection   import init_db
 from modules         import tracking, zones as zones_module, evolution, policies
-from modules         import config_enforcer, code_evolver
+from modules         import config_enforcer, code_evolver, evaluator, supply_tracker
 from commander       import notifier
 from commander       import telegram_bot
 from db.experiences  import mark_plan_applied, mark_plan_failed
@@ -59,13 +62,18 @@ logger = logging.getLogger("Orchestrator")
 # Главный цикл
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_cycle() -> None:
-    """Один полный цикл Orchestrator."""
+def run_cycle(cycle_num: int = 0) -> None:
+    """Один полный цикл Orchestrator. cycle_num используется для throttle-логики."""
     cycle_start = datetime.now()
     logger.info("=" * 60)
-    logger.info("Цикл начат: %s | DRY_RUN=%s", cycle_start.isoformat(), config.DRY_RUN)
+    logger.info("Цикл #%d начат: %s | DRY_RUN=%s", cycle_num, cycle_start.isoformat(), config.DRY_RUN)
 
     try:
+        # ── Шаг 0: Ретроспективная оценка изменений (24h delayed) ────────────
+        evaluated = evaluator.evaluate_pending_changes()
+        if evaluated:
+            logger.info("[0/7] Ретроспективная оценка: %d изменений оценено", evaluated)
+
         # ── Шаг 1: Деградация зон ────────────────────────────────────────────
         logger.info("[1/7] Деградация зон...")
         zones_module.run_decay()
@@ -92,6 +100,19 @@ def run_cycle() -> None:
             sp["total_views"], sp["ban_count"],
             pl["total_clicks"], f"{pl['cr']:.4f}" if pl.get("cr") else "н/д",
         )
+
+        # ── Шаг 3.5: Краш-луп детектор ───────────────────────────────────────
+        reverted = code_evolver.check_and_revert_on_crash()
+        if reverted:
+            logger.warning("[3.5/7] Краш-луп: автооткат выполнен — пропускаем генерацию плана")
+            return
+
+        # ── Шаг 3.6: Мониторинг прокси (раз в N циклов) ──────────────────────
+        if cycle_num % config.SUPPLY_CHECK_EVERY_N_CYCLES == 0:
+            logger.info("[3.6/7] Проверка прокси/баланса...")
+            supply_requests = supply_tracker.check_supply(sp)
+            if supply_requests:
+                logger.info("  Отправлено запросов оператору: %d", supply_requests)
 
         # ── Шаг 4: Генерация плана ───────────────────────────────────────────
         logger.info("[4/7] Генерация плана эволюции (LLM)...")
@@ -192,6 +213,7 @@ def main() -> None:
     telegram_bot.start_bot_thread()
 
     cycle_interval_sec = config.CYCLE_INTERVAL_HOURS * 3600
+    cycle_num = 0
 
     while True:
         # Защита от перекрытия циклов через файловую блокировку
@@ -204,11 +226,12 @@ def main() -> None:
             continue
 
         try:
-            run_cycle()
+            run_cycle(cycle_num=cycle_num)
         finally:
             portalocker.unlock(lock_file)
             lock_file.close()
 
+        cycle_num += 1
         logger.info("Следующий цикл через %d часов", config.CYCLE_INTERVAL_HOURS)
         time.sleep(cycle_interval_sec)
 

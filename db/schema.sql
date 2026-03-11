@@ -145,6 +145,31 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 8: Прокси-события (покупки, продления, ротации)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Используется modules/supply_tracker.py.
+-- Подтверждение оператора через Telegram: status = 'awaiting_confirmation'
+
+CREATE TABLE IF NOT EXISTS proxy_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    event_type      TEXT NOT NULL,  -- 'purchase_request' | 'renewal_request' | 'rotation' | 'balance_alert'
+    proxy_id        TEXT,           -- mobileproxy proxy_id (список через запятую)
+    geo             TEXT,           -- GEO ISO или geoid
+    operator        TEXT,           -- мобильный оператор
+    quantity        INTEGER DEFAULT 1,
+    period_days     INTEGER DEFAULT 30,
+    cost            REAL,           -- расчётная стоимость (руб.)
+    reason          TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'awaiting_confirmation',
+    api_response    TEXT,           -- ответ API (JSON)
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_proxy_events_status
+    ON proxy_events(status, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Индексы для часто используемых запросов
 -- ─────────────────────────────────────────────────────────────────────────────
 

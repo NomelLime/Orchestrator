@@ -17,7 +17,8 @@ modules/code_evolver.py — Zone 4: автоматические патчи ко
     6. Если тесты упали → rollback + запись отрицательного опыта
 
 Экспортирует:
-    apply_code_patches(plan, plan_id) → (success_count, fail_count)
+    apply_code_patches(plan, plan_id)   → (success_count, fail_count)
+    check_and_revert_on_crash()         → bool (True если откат выполнен)
 """
 
 from __future__ import annotations
@@ -31,8 +32,10 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 from db.experiences  import save_applied_change
+from db.connection   import get_db
 from modules.zones   import can_apply, record_success, record_failure
 from integrations    import git_tools
+from integrations.shorts_project import get_crash_loop_agents
 from integrations.ollama_client import call_llm
 
 logger = logging.getLogger(__name__)
@@ -229,6 +232,106 @@ def _generate_patched_code(original_code: str, goal: str, file_name: str) -> Opt
     clean = re.sub(r"^```(?:python)?\s*", "", raw.strip())
     clean = re.sub(r"\s*```$", "", clean)
     return clean.strip()
+
+
+def check_and_revert_on_crash() -> bool:
+    """
+    Проверяет краш-луп агентов ShortsProject.
+    Если краш-луп обнаружен — откатывает последний Orchestrator-коммит в SP через git revert.
+
+    Логика:
+      1. Читает agent_memory.json через get_crash_loop_agents()
+      2. Если есть агент с 3+ restart_requested за последний час —
+         ищет последний коммит [Orchestrator/...] в SP
+      3. Если коммит найден — git revert (создаёт revert-коммит)
+      4. Помечает изменение в БД как rolled_back, пишет в notifier
+
+    Возвращает True если откат был выполнен.
+    """
+    crash_agents = get_crash_loop_agents(
+        window_minutes=config.CRASH_LOOP_WINDOW_MIN,
+        min_restart_requests=config.CRASH_LOOP_MIN_RESTARTS,
+    )
+    if not crash_agents:
+        return False
+
+    agents_str = ", ".join(crash_agents)
+    logger.warning("[CodeEvolver] Краш-луп обнаружен: %s — ищу последний патч для отката", agents_str)
+
+    # Ищем последний Orchestrator-коммит в SP
+    commit_hash = git_tools.find_last_orc_commit(config.SHORTS_PROJECT_DIR)
+    if not commit_hash:
+        logger.warning("[CodeEvolver] Краш-луп есть, но Orchestrator-коммитов не найдено — откат невозможен")
+        _notify_crash_no_commit(agents_str)
+        return False
+
+    # Откатываем
+    reverted = git_tools.revert_commit(config.SHORTS_PROJECT_DIR, commit_hash)
+    if not reverted:
+        logger.error("[CodeEvolver] git revert %s не удался", commit_hash)
+        _notify_crash_revert_failed(agents_str, commit_hash)
+        return False
+
+    # Помечаем последнее code_patch изменение как rolled_back
+    _mark_last_patch_reverted(crash_agents)
+
+    record_failure("code", f"краш-луп агентов: {agents_str} → откат {commit_hash}")
+
+    _notify_crash_reverted(agents_str, commit_hash)
+    logger.info("[CodeEvolver] ✅ Откат %s выполнен (краш-луп: %s)", commit_hash, agents_str)
+    return True
+
+
+def _mark_last_patch_reverted(crash_agents: list) -> None:
+    """Помечает последний code_patch как rolled_back в applied_changes."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("""
+                SELECT id FROM applied_changes
+                WHERE change_type = 'code_patch' AND rolled_back = 0
+                ORDER BY applied_at DESC LIMIT 1
+            """).fetchone()
+            if row:
+                conn.execute("""
+                    UPDATE applied_changes
+                    SET rolled_back = 1,
+                        rollback_reason = ?
+                    WHERE id = ?
+                """, (f"краш-луп: {', '.join(crash_agents)}", row["id"]))
+    except Exception as exc:
+        logger.warning("[CodeEvolver] Не удалось пометить откат в БД: %s", exc)
+
+
+def _notify_crash_reverted(agents_str: str, commit_hash: str) -> None:
+    from commander import notifier
+    notifier.send_message(
+        f"🔄 <b>Orchestrator: автооткат патча</b>\n"
+        f"Краш-луп агентов: <b>{agents_str}</b>\n"
+        f"Откатан коммит: <code>{commit_hash}</code>\n"
+        f"Зона 'code' получила штраф."
+    )
+    notifier.log_notification(
+        f"Автооткат {commit_hash}: краш-луп {agents_str}",
+        level="warning", category="patch",
+    )
+
+
+def _notify_crash_no_commit(agents_str: str) -> None:
+    from commander import notifier
+    notifier.send_message(
+        f"⚠️ <b>Orchestrator: краш-луп без патча</b>\n"
+        f"Агенты в краш-лупе: <b>{agents_str}</b>\n"
+        f"Последних Orchestrator-коммитов не найдено."
+    )
+
+
+def _notify_crash_revert_failed(agents_str: str, commit_hash: str) -> None:
+    from commander import notifier
+    notifier.send_message(
+        f"🔴 <b>Orchestrator: откат не удался</b>\n"
+        f"Краш-луп: <b>{agents_str}</b>\n"
+        f"git revert <code>{commit_hash}</code> вернул ошибку — требуется ручное вмешательство."
+    )
 
 
 def _run_tests() -> Tuple[bool, str]:

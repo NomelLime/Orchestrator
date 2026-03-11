@@ -109,3 +109,37 @@ def get_last_commit_hash(repo_dir: Path) -> str:
     """Возвращает хэш последнего коммита или пустую строку."""
     result = _run_git(["rev-parse", "--short", "HEAD"], cwd=repo_dir)
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def find_last_orc_commit(repo_dir: Path) -> str:
+    """
+    Ищет хэш последнего коммита с меткой [Orchestrator...] в SP-репозитории.
+    Возвращает short hash или пустую строку.
+    """
+    result = _run_git(
+        ["log", "--oneline", "--grep", "[Orchestrator", "-1"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return ""
+    # Формат: "abc1234 [Orchestrator/CodeEvolver] описание"
+    parts = result.stdout.strip().split(" ", 1)
+    return parts[0] if parts else ""
+
+
+def revert_commit(repo_dir: Path, commit_hash: str) -> bool:
+    """
+    Откатывает коммит через git revert --no-edit (создаёт revert-коммит).
+    Возвращает True при успехе.
+    """
+    if not commit_hash:
+        return False
+    result = _run_git(
+        ["revert", commit_hash, "--no-edit"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        logger.warning("[Git] revert %s не удался: %s", commit_hash, result.stderr[:200])
+        return False
+    logger.info("[Git] Откат коммита %s выполнен", commit_hash)
+    return True

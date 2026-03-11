@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, date
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -144,6 +144,23 @@ def _build_digest(today: str) -> str:
             WHERE change_type = 'code_patch' AND DATE(applied_at) = ?
         """, (today,)).fetchone()
 
+        # Последние снапшоты метрик
+        sp_snap = conn.execute("""
+            SELECT sp_total_views, sp_total_likes, sp_avg_ctr,
+                   sp_top_platform, sp_ban_count
+            FROM metrics_snapshots
+            WHERE source = 'ShortsProject'
+            ORDER BY snapshot_at DESC LIMIT 1
+        """).fetchone()
+
+        pl_snap = conn.execute("""
+            SELECT pl_total_clicks, pl_conversions, pl_cr,
+                   pl_bot_pct, pl_top_geo, raw_summary_json
+            FROM metrics_snapshots
+            WHERE source = 'PreLend'
+            ORDER BY snapshot_at DESC LIMIT 1
+        """).fetchone()
+
         # Уведомления за сегодня (не включённые ещё в дайджест)
         notifications = conn.execute("""
             SELECT level, category, message
@@ -160,7 +177,8 @@ def _build_digest(today: str) -> str:
         z       = zones.get(name, {})
         enabled = bool(z.get("enabled"))
         score   = z.get("confidence_score", 0)
-        icon    = "✅" if enabled else "⛔"
+        frozen  = is_zone_frozen(name)
+        icon    = "🔒" if frozen else ("✅" if enabled else "⛔")
         zones_lines.append(f"  {icon} {name}: {score}/100")
 
     lines = [
@@ -179,6 +197,40 @@ def _build_digest(today: str) -> str:
         ]
 
     lines += ["\n<b>Зоны доверия:</b>"] + zones_lines
+
+    # ── Метрики ShortsProject ─────────────────────────────────────────────────
+    if sp_snap and sp_snap["sp_total_views"] is not None:
+        ctr_str = f"{sp_snap['sp_avg_ctr']:.3f}" if sp_snap["sp_avg_ctr"] else "—"
+        lines += [
+            "\n<b>ShortsProject (последний снапшот):</b>",
+            f"  👁 Просмотры:   {sp_snap['sp_total_views']:,}",
+            f"  👍 Лайки:       {sp_snap['sp_total_likes'] or 0:,}",
+            f"  📈 CTR:         {ctr_str}",
+            f"  🏆 Топ:         {sp_snap['sp_top_platform'] or '—'}",
+            f"  🚫 Бан-события: {sp_snap['sp_ban_count'] or 0}",
+        ]
+
+    # ── Метрики PreLend ───────────────────────────────────────────────────────
+    if pl_snap and pl_snap["pl_total_clicks"] is not None:
+        bot_pct_str = f"{pl_snap['pl_bot_pct']:.1f}%" if pl_snap["pl_bot_pct"] is not None else "—"
+        cr_str      = f"{pl_snap['pl_cr']:.4f}"       if pl_snap["pl_cr"]       else "—"
+        lines += [
+            "\n<b>PreLend (последний снапшот):</b>",
+            f"  🖱 Кликов:     {pl_snap['pl_total_clicks']:,}",
+            f"  💰 Конверсий:  {pl_snap['pl_conversions'] or 0}",
+            f"  📊 CR:         {cr_str}",
+            f"  🤖 Ботов:      {bot_pct_str}",
+            f"  🌍 Топ ГЕО:    {pl_snap['pl_top_geo'] or '—'}",
+        ]
+        # shave_suspects живёт в raw_summary_json
+        if pl_snap["raw_summary_json"]:
+            try:
+                raw = json.loads(pl_snap["raw_summary_json"])
+                suspects = raw.get("shave_suspects", [])
+                if suspects:
+                    lines.append(f"  ⚠️ Шейв:       {suspects}")
+            except Exception:
+                pass
 
     if notifications:
         lines.append("\n<b>События:</b>")

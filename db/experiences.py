@@ -2,11 +2,14 @@
 db/experiences.py — Запись и чтение планов эволюции и применённых изменений.
 
 Экспортирует:
-    save_evolution_plan(...)     → id нового плана
+    save_evolution_plan(...)         → id нового плана
     mark_plan_applied(plan_id)
     mark_plan_failed(plan_id)
-    save_applied_change(...)     → id записи
-    get_recent_experience(n)     → список последних N результатов для LLM-промпта
+    save_applied_change(...)         → id записи
+    update_metric_impact(id, delta)  → записывает результат 24h оценки
+    get_recent_experience(n)         → список последних N результатов (legacy)
+    get_rich_experience_context(n)   → список с metric_impact для LLM-промпта
+    get_failed_patterns()            → описания неудач
 """
 
 from __future__ import annotations
@@ -129,6 +132,54 @@ def get_recent_experience(last_n: int = 20) -> List[Dict]:
         """, (last_n,)).fetchall()
 
     return [dict(row) for row in rows]
+
+
+def update_metric_impact(change_id: int, delta: Dict) -> None:
+    """Записывает результат ретроспективной оценки (evaluator.py → сюда)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE applied_changes SET metric_impact_json = ? WHERE id = ?",
+            (json.dumps(delta, ensure_ascii=False), change_id),
+        )
+    logger.info("[Experience] Metric impact записан для изменения #%d", change_id)
+
+
+def get_rich_experience_context(last_n: int = 10) -> List[Dict]:
+    """
+    Возвращает последние N изменений с результатами оценки (metric_impact_json).
+    Используется в evolution.py для показа LLM реальных результатов.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT
+                ac.id,
+                ac.change_type,
+                ac.repo,
+                ac.zone,
+                ac.description,
+                ac.test_status,
+                ac.rolled_back,
+                ac.rollback_reason,
+                ac.applied_at,
+                ac.metric_impact_json,
+                ep.summary AS plan_summary
+            FROM applied_changes ac
+            LEFT JOIN evolution_plans ep ON ac.evolution_plan_id = ep.id
+            ORDER BY ac.applied_at DESC
+            LIMIT ?
+        """, (last_n,)).fetchall()
+
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["metric_impact"] = None
+        if d.get("metric_impact_json"):
+            try:
+                d["metric_impact"] = json.loads(d["metric_impact_json"])
+            except Exception:
+                pass
+        result.append(d)
+    return result
 
 
 def get_failed_patterns() -> List[str]:

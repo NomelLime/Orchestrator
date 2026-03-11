@@ -61,15 +61,16 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         raw_uploads (список последних загрузок для LLM-анализа)
     """
     result: Dict[str, Any] = {
-        "period_hours":  period_hours,
-        "total_views":   0,
-        "total_likes":   0,
-        "avg_ctr":       None,
-        "top_platform":  None,
-        "ab_summary":    [],
-        "ban_count":     0,
-        "agent_statuses":{},
-        "raw_uploads":   [],
+        "period_hours":    period_hours,
+        "total_views":     0,
+        "total_likes":     0,
+        "avg_ctr":         None,
+        "top_platform":    None,
+        "ab_summary":      [],
+        "ban_count":       0,
+        "agent_statuses":  {},
+        "raw_uploads":     [],
+        "strategist_recs": {},  # рекомендации Strategist из agent_memory KV
     }
 
     # ── analytics.json ───────────────────────────────────────────────────────
@@ -142,18 +143,31 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
     if memory:
         result["agent_statuses"] = memory.get("agents", {})
 
-        # Считаем бан-события из KV (Guardian логирует бан-сигналы)
-        # TODO: точный формат ban-событий уточнить после просмотра guardian.py
         kv = memory.get("kv", {})
+
+        # Считаем бан-события из KV (Guardian логирует бан-сигналы)
         ban_keys = [k for k in kv if "ban" in k.lower()]
         result["ban_count"] = len(ban_keys)
 
+        # Рекомендации Strategist: ключи вида "rec.strategist.<agent>"
+        # Strategist пишет их каждые 6 часов после Ollama-анализа.
+        # Orchestrator читает эти выводы как входные данные — не дублирует анализ.
+        strategist_recs = {
+            k[len("rec.strategist."):]: v
+            for k, v in kv.items()
+            if k.startswith("rec.strategist.")
+        }
+        result["strategist_recs"] = strategist_recs
+        if strategist_recs:
+            logger.debug("[Tracking] Strategist рекомендации: %s", list(strategist_recs.keys()))
+
     logger.info(
-        "[Tracking] SP: views=%d, likes=%d, CTR=%.3f, top_platform=%s, bans=%d",
+        "[Tracking] SP: views=%d, likes=%d, CTR=%.3f, top_platform=%s, bans=%d, strategist_keys=%d",
         result["total_views"], result["total_likes"],
         result["avg_ctr"] or 0,
         result["top_platform"] or "?",
         result["ban_count"],
+        len(result["strategist_recs"]),
     )
     return result
 

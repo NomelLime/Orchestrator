@@ -53,11 +53,55 @@ def _get_application():
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _handle_text(update, context) -> None:
-    """Любое текстовое сообщение → сохранить в operator_commands."""
-    text = update.message.text or ""
-    if not text.strip():
+    """
+    Текстовое сообщение:
+      'да <id>' / 'нет <id>' → подтверждение/отклонение proxy_event
+      Всё остальное → сохраняется в operator_commands
+    """
+    from modules.supply_tracker import confirm_purchase, reject_purchase, get_pending_purchase
+
+    text  = (update.message.text or "").strip()
+    lower = text.lower()
+    if not text:
         return
 
+    # ── Подтверждение прокси-запроса ──────────────────────────────────────────
+    if lower.startswith(("да", "yes", "нет", "no")):
+        is_yes = lower.startswith(("да", "yes"))
+        parts  = lower.split()
+
+        # ID события — второй токен если числовой
+        event_id: Optional[int] = None
+        for part in parts[1:]:
+            if part.isdigit():
+                event_id = int(part)
+                break
+
+        # Если ID не указан — берём первый ожидающий запрос
+        if event_id is None:
+            pending = get_pending_purchase()
+            if pending:
+                event_id = pending["id"]
+
+        if event_id is not None:
+            pending = get_pending_purchase()
+            if pending and pending["id"] == event_id:
+                if is_yes:
+                    ok = confirm_purchase(event_id)
+                    if not ok:
+                        await update.message.reply_text(
+                            f"❌ Не удалось выполнить event #{event_id}. Проверь баланс."
+                        )
+                else:
+                    reject_purchase(event_id)
+                return
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Event #{event_id} не найден или уже обработан."
+                )
+                return
+
+    # ── Обычная команда оператора ─────────────────────────────────────────────
     cmd_id = save_command(raw_text=text)
     await update.message.reply_text(
         f"✅ Команда принята (#{cmd_id}). Будет обработана на следующем цикле."
@@ -140,6 +184,40 @@ async def _handle_status(update, context) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def _handle_proxies(update, context) -> None:
+    """/proxies — список прокси и ожидающие запросы."""
+    from integrations.proxy_manager import get_my_proxies, get_balance
+    from modules.supply_tracker import get_pending_purchase
+
+    lines = ["🌐 <b>Прокси (mobileproxy.space)</b>\n"]
+
+    balance = get_balance()
+    lines.append(f"Баланс: <b>{balance:.0f} руб.</b>" if balance is not None else "Баланс: недоступен")
+
+    proxies = get_my_proxies()
+    if proxies:
+        lines.append(f"\nАктивных прокси: {len(proxies)}")
+        for p in proxies[:5]:  # показываем первые 5
+            pid = p.get("proxy_id", "?")
+            geo = p.get("proxy_geo", "?")
+            exp = (p.get("proxy_exp") or "?")[:10]
+            lines.append(f"  • #{pid} {geo} (до {exp})")
+        if len(proxies) > 5:
+            lines.append(f"  ... и ещё {len(proxies) - 5}")
+    else:
+        lines.append("\nПрокси не найдены (проверь ORC_MOBILEPROXY_API_KEY)")
+
+    pending = get_pending_purchase()
+    if pending:
+        lines.append(
+            f"\n⏳ <b>Ожидает подтверждения (event #{pending['id']}):</b>\n"
+            f"  {pending.get('reason', '?')}\n"
+            f"  Ответь: <b>да {pending['id']}</b> или <b>нет {pending['id']}</b>"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def _handle_help(update, context) -> None:
     """/help — справка."""
     await update.message.reply_text(
@@ -148,7 +226,11 @@ async def _handle_help(update, context) -> None:
         "/zones — состояние зон доверия\n"
         "/last_plan — последний план эволюции\n"
         "/status — статус системы\n"
+        "/proxies — прокси и ожидающие запросы\n"
         "/help — эта справка\n\n"
+        "<b>Подтверждение прокси:</b>\n"
+        "  да 7 — выполнить запрос #7\n"
+        "  нет 7 — отменить запрос #7\n\n"
         "<b>Свободный текст:</b>\n"
         "Любое сообщение будет интерпретировано и применено.\n"
         "Примеры:\n"
@@ -180,6 +262,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("zones",     _handle_zones))
     app.add_handler(CommandHandler("last_plan", _handle_last_plan))
     app.add_handler(CommandHandler("status",    _handle_status))
+    app.add_handler(CommandHandler("proxies",   _handle_proxies))
     app.add_handler(CommandHandler("help",      _handle_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
 

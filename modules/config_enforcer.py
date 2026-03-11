@@ -1,8 +1,9 @@
 """
 modules/config_enforcer.py — Безопасное применение изменений конфигов.
 
-Только Zone 1 (scheduling) и Zone 2 (visual) на данном этапе.
-Zone 3 (prelend) — TODO.
+Zone 1 (scheduling) — upload_schedule в account/config.json ShortsProject.
+Zone 2 (visual)     — TODO: параметры уникализации видео.
+Zone 3 (prelend)    — settings.json (пороги алертов) + advertisers.json (ставки).
 
 Каждое изменение:
     1. Читает текущее значение (old_value)
@@ -195,18 +196,135 @@ def _apply_sp_schedule(
 
 def _apply_pl_config_change(change: Dict, plan_id: int, zone: str) -> bool:
     """
-    Применяет изменение конфига PreLend (settings.json или advertisers.json).
+    Применяет изменение конфига PreLend.
 
-    TODO (Zone 3): реализовать конкретные типы изменений.
-    Пока только заглушка с логированием.
+    Поддерживаемые scope:
+        thresholds      → settings.json → alerts.*  (числовые пороги)
+        advertiser_rate → advertisers.json → [id=X].rate
     """
-    scope       = change.get("scope", "")
+    scope = change.get("scope", "")
+
+    if scope == "thresholds":
+        return _apply_pl_thresholds(change, plan_id, zone)
+    elif scope == "advertiser_rate":
+        return _apply_pl_advertiser_rate(change, plan_id, zone)
+    else:
+        logger.warning("[ConfigEnforcer] Неизвестный PreLend scope: '%s'", scope)
+        return False
+
+
+# Разрешённые параметры в settings.json → alerts (не даём LLM менять что попало)
+_PL_ALLOWED_THRESHOLDS = frozenset({
+    "bot_pct_per_hour",
+    "offgeo_pct_per_hour",
+    "shave_threshold_pct",
+    "landing_slow_ms",
+    "landing_down_alert_min",
+})
+
+
+def _apply_pl_thresholds(change: Dict, plan_id: int, zone: str) -> bool:
+    """
+    Обновляет числовой порог в PreLend/config/settings.json → alerts.
+    """
+    param       = change.get("param", "")
+    new_value   = change.get("new_value")
     description = change.get("description", "")
 
-    # TODO: реализовать изменение порогов alerts в settings.json
-    # TODO: реализовать смену CTA/заголовков в шаблонах
-    logger.info("[ConfigEnforcer] PreLend config '%s' — TODO (Zone 3): %s", scope, description)
-    return False
+    if param not in _PL_ALLOWED_THRESHOLDS:
+        logger.warning("[ConfigEnforcer] PreLend threshold: недопустимый param '%s'", param)
+        return False
+    if new_value is None:
+        logger.warning("[ConfigEnforcer] PreLend threshold: нет new_value для '%s'", param)
+        return False
+
+    settings_path = config.PL_SETTINGS
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("[ConfigEnforcer] Не удалось прочитать PL settings.json: %s", exc)
+        return False
+
+    old_value = settings.get("alerts", {}).get(param)
+    if old_value == new_value:
+        logger.debug("[ConfigEnforcer] PL threshold %s не изменился (%s)", param, new_value)
+        return True
+
+    git_tools.backup_file(settings_path, repo_dir=config.PRELEND_DIR)
+    settings.setdefault("alerts", {})[param] = new_value
+    _atomic_write_json(settings_path, settings)
+
+    git_tools.commit_change(
+        repo_dir  = config.PRELEND_DIR,
+        file_path = settings_path,
+        message   = f"[Orchestrator] PL threshold {param}: {old_value} → {new_value}",
+    )
+    save_applied_change(
+        plan_id     = plan_id,
+        change_type = "config_change",
+        repo        = "PreLend",
+        zone        = zone,
+        description = description or f"threshold {param}",
+        file_path   = "config/settings.json",
+        old_value   = {"alerts": {param: old_value}},
+        new_value   = {"alerts": {param: new_value}},
+        test_status = "skipped",
+    )
+    logger.info("[ConfigEnforcer] PL threshold %s: %s → %s", param, old_value, new_value)
+    return True
+
+
+def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
+    """
+    Изменяет поле rate рекламодателя в PreLend/config/advertisers.json.
+    """
+    advertiser_id = change.get("advertiser_id") or change.get("param", "")
+    new_rate      = change.get("new_value")
+    description   = change.get("description", "")
+
+    if not advertiser_id or new_rate is None:
+        logger.warning("[ConfigEnforcer] PreLend advertiser_rate: нужны advertiser_id и new_value")
+        return False
+
+    adv_path = config.PL_ADVERTISERS
+    try:
+        advertisers = json.loads(adv_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("[ConfigEnforcer] Не удалось прочитать PL advertisers.json: %s", exc)
+        return False
+
+    target   = next((a for a in advertisers if a.get("id") == advertiser_id), None)
+    if target is None:
+        logger.warning("[ConfigEnforcer] PreLend: рекламодатель '%s' не найден", advertiser_id)
+        return False
+
+    old_rate = target.get("rate")
+    if old_rate == new_rate:
+        logger.debug("[ConfigEnforcer] PL rate %s не изменился (%s)", advertiser_id, new_rate)
+        return True
+
+    git_tools.backup_file(adv_path, repo_dir=config.PRELEND_DIR)
+    target["rate"] = new_rate
+    _atomic_write_json(adv_path, advertisers)
+
+    git_tools.commit_change(
+        repo_dir  = config.PRELEND_DIR,
+        file_path = adv_path,
+        message   = f"[Orchestrator] PL rate {advertiser_id}: {old_rate} → {new_rate}",
+    )
+    save_applied_change(
+        plan_id     = plan_id,
+        change_type = "config_change",
+        repo        = "PreLend",
+        zone        = zone,
+        description = description or f"rate {advertiser_id}",
+        file_path   = "config/advertisers.json",
+        old_value   = {"id": advertiser_id, "rate": old_rate},
+        new_value   = {"id": advertiser_id, "rate": new_rate},
+        test_status = "skipped",
+    )
+    logger.info("[ConfigEnforcer] PL rate %s: %s → %s", advertiser_id, old_rate, new_rate)
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

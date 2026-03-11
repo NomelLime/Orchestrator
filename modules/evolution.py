@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import config
 from db.experiences import (
-    save_evolution_plan, get_recent_experience, get_failed_patterns
+    save_evolution_plan, get_rich_experience_context, get_failed_patterns
 )
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
@@ -98,7 +98,7 @@ def _build_prompt(metrics_data: Dict) -> str:
 
     zones    = get_all_zones()
     policies = get_all_policies()
-    recent   = get_recent_experience(last_n=10)
+    recent   = get_rich_experience_context(last_n=10)
     failed   = get_failed_patterns()
 
     active_zones = [name for name, z in zones.items() if z.get("enabled")]
@@ -122,6 +122,18 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
 Подозрения на шейв: {pl.get('shave_suspects', [])}
 """
 
+    # ── Рекомендации Strategist SP ────────────────────────────────────────────
+    # Strategist уже проанализировал данные SP 6 часов назад — используем его
+    # выводы как дополнительный контекст, не дублируем GPU-нагрузку.
+    strategist_recs = sp.get("strategist_recs", {})
+    if strategist_recs:
+        strategist_block = "\n=== РЕКОМЕНДАЦИИ ВНУТРЕННЕГО СТРАТЕГИСТА SP (последние 6ч) ===\n"
+        strategist_block += "(можешь опираться на них или переопределить, если метрики говорят иное)\n"
+        for agent_key, rec in strategist_recs.items():
+            strategist_block += f"  {agent_key}: {str(rec)[:200]}\n"
+    else:
+        strategist_block = ""
+
     # ── Секция зон ────────────────────────────────────────────────────────────
     zones_block = "=== ДОСТУПНЫЕ ЗОНЫ ===\n"
     for name in ("scheduling", "visual", "prelend", "code"):
@@ -129,20 +141,42 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
         status = "✅ АКТИВНА" if z.get("enabled") else "⛔ НЕАКТИВНА"
         zones_block += f"  {name}: {status} (confidence={z.get('confidence_score', 0)})\n"
 
-    # ── Секция опыта ──────────────────────────────────────────────────────────
-    experience_block = "=== ПРОШЛЫЙ ОПЫТ ===\n"
+    # ── Секция опыта с реальными результатами ─────────────────────────────────
+    experience_block = "=== ПРОШЛЫЕ ЭКСПЕРИМЕНТЫ И ИХ РЕЗУЛЬТАТЫ ===\n"
+    experience_block += "(формат: статус [зона] описание → результат через 24ч)\n"
     if recent:
-        for exp in recent[:5]:
-            icon = "✅" if not exp.get("rolled_back") else "❌"
+        for exp in recent[:8]:
+            if exp.get("rolled_back"):
+                icon = "❌"
+                outcome = f"откат: {exp.get('rollback_reason') or 'тесты упали'}"
+            elif exp.get("metric_impact"):
+                impact  = exp["metric_impact"]
+                parts   = []
+                if "views_delta_pct" in impact:
+                    parts.append(f"views {impact['views_delta_pct']:+.1f}%")
+                if "ctr_delta_pct" in impact:
+                    parts.append(f"CTR {impact['ctr_delta_pct']:+.1f}%")
+                if "cr_delta_pct" in impact:
+                    parts.append(f"CR {impact['cr_delta_pct']:+.1f}%")
+                if "ban_delta" in impact:
+                    parts.append(f"баны {impact['ban_delta']:+d}")
+                if "bot_pct_delta" in impact:
+                    parts.append(f"боты {impact['bot_pct_delta']:+.1f}%")
+                outcome = ", ".join(parts) if parts else "данные есть, дельта 0"
+                icon    = "✅" if any(
+                    impact.get(k, 0) > 0 for k in ("views_delta_pct", "ctr_delta_pct", "cr_delta_pct")
+                ) else "⚠️"
+            else:
+                icon    = "⏳"
+                outcome = "оценка ещё не готова (< 24ч)"
             experience_block += (
-                f"  {icon} [{exp['zone']}] {exp['description'][:80]} "
-                f"(тест: {exp.get('test_status') or 'н/д'})\n"
+                f"  {icon} [{exp['zone']}] {exp['description'][:75]} → {outcome}\n"
             )
     else:
         experience_block += "  Нет данных (первый запуск)\n"
 
     if failed:
-        experience_block += "\n=== ЧТО НЕ РАБОТАЛО (не повторять) ===\n"
+        experience_block += "\n=== НЕ ПОВТОРЯТЬ (привели к откату / ухудшению) ===\n"
         for f in failed[:5]:
             experience_block += f"  ❌ {f}\n"
 
@@ -155,15 +189,25 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
 
     # ── Инструкции по формату ─────────────────────────────────────────────────
     format_instructions = """
-=== ТВОЯ ЗАДАЧА ===
-Ты — Orchestrator, автономный оптимизатор системы публикации Shorts/Reels.
-Проанализируй данные и сгенерируй план эволюции.
+=== ТВОЯ РОЛЬ И ЦЕЛЬ ===
+Ты — автономная система управления рекламным бизнесом.
+Два актива: ShortsProject (органический трафик) и PreLend (монетизация: клоакинг, конверсии).
 
-ВАЖНЫЕ ОГРАНИЧЕНИЯ:
-1. Предлагай изменения ТОЛЬКО в активных зонах (см. выше).
-2. Zone 'code' — только Python-файлы ShortsProject, не PHP.
-3. Не повторяй неудачные паттерны из прошлого опыта.
-4. Если данных мало — предлагай осторожные изменения (риск: low).
+ЕДИНСТВЕННАЯ метрика успеха: конверсии PreLend × ставки рекламодателей.
+CTR и просмотры — промежуточные метрики, ценны только как пролог к конверсиям.
+Баны = прямые потери: меньше аккаунтов → меньше трафика → меньше конверсий.
+
+Методология: одна чёткая, обратимая гипотеза за цикл.
+Не экспериментировать с несколькими переменными одновременно.
+Опираться на реальные результаты прошлых экспериментов (см. выше).
+
+ПРАВИЛА ПРИНЯТИЯ РЕШЕНИЙ:
+1. Изменения только в АКТИВНЫХ зонах (см. выше).
+2. Не повторять эксперименты с отрицательным или нулевым результатом.
+3. При росте бан-событий — ПРЕЖДЕ ВСЕГО снижать агрессию публикаций.
+4. Zone 'code' — только Python-файлы ShortsProject, не PHP.
+5. Zone 'prelend' — только settings.json (пороги алертов) и advertisers.json (ставки).
+6. Если нет чётких данных для улучшения — верни summary: "Пропуск цикла: данных недостаточно" и пустые targets.
 
 Верни ТОЛЬКО валидный JSON без markdown, пояснений и преамбул:
 
@@ -178,7 +222,7 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
         {
           "scope": "scheduling",
           "description": "что именно изменить и почему",
-          "accounts": ["all"] or ["acc_1", "acc_2"],
+          "accounts": ["all"],
           "platform": "tiktok",
           "param": "upload_schedule",
           "new_value": ["20:00", "22:00"]
@@ -187,7 +231,20 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
       "code_patches": []
     },
     "prelend": {
-      "config_changes": [],
+      "config_changes": [
+        {
+          "scope": "thresholds",
+          "description": "что именно изменить и почему",
+          "param": "bot_pct_per_hour",
+          "new_value": 30
+        },
+        {
+          "scope": "advertiser_rate",
+          "description": "снизить ставку underperforming рекламодателя",
+          "advertiser_id": "adv_001",
+          "new_value": 3.5
+        }
+      ],
       "code_patches": []
     }
   },
@@ -201,6 +258,7 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
     return (
         f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
         + metrics_block
+        + strategist_block
         + zones_block
         + experience_block
         + policies_block

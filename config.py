@@ -113,6 +113,34 @@ GIT_AUTOCOMMIT = True
 GIT_AUTHOR     = "Orchestrator <orchestrator@local>"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Proxy supply (mobileproxy.space)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MOBILEPROXY_API_KEY      = os.getenv("ORC_MOBILEPROXY_API_KEY", "")
+
+# Минимальный баланс в рублях — ниже него алерт в Telegram
+PROXY_MIN_BALANCE_RUB    = float(os.getenv("ORC_PROXY_MIN_BALANCE", "300"))
+
+# Предупреждение об истечении прокси за N дней
+PROXY_EXPIRY_WARN_DAYS   = int(os.getenv("ORC_PROXY_EXPIRY_DAYS", "3"))
+
+# Порог бан-событий за 24ч для рекомендации нового прокси
+PROXY_BAN_SPIKE_THRESH   = int(os.getenv("ORC_PROXY_BAN_THRESH", "5"))
+
+# Проверка прокси раз в N циклов (не на каждом цикле)
+SUPPLY_CHECK_EVERY_N_CYCLES = int(os.getenv("ORC_SUPPLY_CHECK_CYCLES", "6"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Краш-луп детектор (Phase D)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Окно анализа краш-лупа в минутах
+CRASH_LOOP_WINDOW_MIN    = int(os.getenv("ORC_CRASH_WINDOW_MIN", "60"))
+
+# Минимальное число restart_requested за окно для признания краш-лупа
+CRASH_LOOP_MIN_RESTARTS  = int(os.getenv("ORC_CRASH_MIN_RESTARTS", "3"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Режим безопасности
 # ─────────────────────────────────────────────────────────────────────────────
 

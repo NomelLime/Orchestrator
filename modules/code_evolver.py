@@ -1,5 +1,5 @@
 """
-modules/code_evolver.py — Zone 4: автоматические патчи кода.
+modules/code_evolver.py — Zone 4: патчи кода через Telegram-апрув.
 
 ОГРАНИЧЕНИЯ (намеренные, см. config.py):
     - Только .py файлы
@@ -8,21 +8,28 @@ modules/code_evolver.py — Zone 4: автоматические патчи ко
     - Требует прохождения pytest перед применением
     - При падении тестов — обязательный rollback
 
-Пайплайн для каждого патча:
-    1. Прочитать исходный файл
-    2. Сгенерировать патч через Qwen-coder (Ollama)
-    3. Применить патч к копии файла
-    4. Запустить pytest
-    5. Если тесты прошли → заменить оригинал + git commit
-    6. Если тесты упали → rollback + запись отрицательного опыта
+Пайплайн (двухшаговый, без авто-применения):
+
+  queue_code_patches(plan, plan_id)    → (queued_count)
+      1. Читает исходный файл
+      2. Генерирует патч через Qwen-coder (Ollama)
+      3. Сохраняет в pending_patches со статусом 'pending'
+      4. Отправляет diff в Telegram — оператор отвечает /approve_N или /reject_N
+
+  apply_approved_patches()             → (success_count, fail_count)
+      1. Берёт все патчи со статусом 'approved' из pending_patches
+      2. Применяет: tmpfile → pytest → git commit или rollback
+      3. Помечает как 'applied' или 'failed'
 
 Экспортирует:
-    apply_code_patches(plan, plan_id)   → (success_count, fail_count)
+    queue_code_patches(plan, plan_id)   → int
+    apply_approved_patches()            → (int, int)
     check_and_revert_on_crash()         → bool (True если откат выполнен)
 """
 
 from __future__ import annotations
 
+import difflib
 import logging
 import shutil
 import subprocess
@@ -33,6 +40,10 @@ from typing import Dict, List, Optional, Tuple
 import config
 from db.experiences  import save_applied_change
 from db.connection   import get_db
+from db.patches      import (
+    save_pending_patch, get_approved_patches,
+    mark_patch_applied, mark_patch_failed,
+)
 from modules.zones   import can_apply, record_success, record_failure
 from integrations    import git_tools
 from integrations.shorts_project import get_crash_loop_agents
@@ -41,29 +52,29 @@ from integrations.ollama_client import call_llm
 logger = logging.getLogger(__name__)
 
 
-def apply_code_patches(plan: Dict, plan_id: int) -> Tuple[int, int]:
+# ─────────────────────────────────────────────────────────────────────────────
+# Шаг 1 цикла: генерация патчей и отправка на одобрение
+# ─────────────────────────────────────────────────────────────────────────────
+
+def queue_code_patches(plan: Dict, plan_id: int) -> int:
     """
-    Применяет все code_patches из плана.
-    Поддерживает только ShortsProject Python-файлы (Zone 4).
+    Генерирует патчи кода из плана, сохраняет в БД и отправляет diff в Telegram.
+    Патчи НЕ применяются автоматически — ждут /approve_N от оператора.
 
     Returns:
-        (success_count, fail_count)
+        Количество поставленных в очередь патчей.
     """
-    success = 0
-    fail    = 0
-
     if not can_apply("code"):
         logger.info("[CodeEvolver] Zone 'code' неактивна — патчи пропущены")
-        return 0, 0
+        return 0
 
     # ShortsProject patches
     sp_patches = plan.get("targets", {}).get("shorts_project", {}).get("code_patches", [])
+    queued = 0
     for patch_spec in sp_patches:
-        ok = _apply_single_patch(patch_spec, plan_id, repo="ShortsProject")
+        ok = _queue_single_patch(patch_spec, plan_id, repo="ShortsProject")
         if ok:
-            success += 1
-        else:
-            fail += 1
+            queued += 1
 
     # PreLend patches — ЗАБЛОКИРОВАНЫ
     pl_patches = plan.get("targets", {}).get("prelend", {}).get("code_patches", [])
@@ -73,22 +84,21 @@ def apply_code_patches(plan: Dict, plan_id: int) -> Tuple[int, int]:
             "Пропущено %d патчей.", len(pl_patches)
         )
 
-    return success, fail
+    if queued:
+        logger.info("[CodeEvolver] Поставлено в очередь: %d патч(ей) — ожидают /approve_N", queued)
+
+    return queued
 
 
-def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
+def _queue_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
     """
-    Полный пайплайн применения одного патча.
+    Генерирует патч для одного файла, сохраняет в pending_patches,
+    отправляет diff в Telegram.
 
-    patch_spec структура:
-        file: "pipeline/agents/editor.py"
-        goal: "Снизить агрессивность шума"
-        patch_format: "unified_diff" | "full_file"
-
-    Returns True если патч применён успешно.
+    Returns True если патч успешно поставлен в очередь.
     """
-    file_rel  = patch_spec.get("file", "")
-    goal      = patch_spec.get("goal", "")
+    file_rel = patch_spec.get("file", "")
+    goal     = patch_spec.get("goal", "")
 
     # ── Валидация ─────────────────────────────────────────────────────────────
     if not file_rel or not goal:
@@ -119,17 +129,86 @@ def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         return False
 
     # Проверка размера патча
-    original_lines = original_code.count("\n")
-    patched_lines  = patched_code.count("\n")
-    delta_lines    = abs(patched_lines - original_lines)
+    delta_lines = abs(patched_code.count("\n") - original_code.count("\n"))
     if delta_lines > config.CODE_EVOLVER_MAX_PATCH_LINES:
         logger.warning(
-            "[CodeEvolver] Патч слишком большой (%d строк изменений > %d лимит) — отклонён",
+            "[CodeEvolver] Патч слишком большой (%d строк > лимит %d) — отклонён",
             delta_lines, config.CODE_EVOLVER_MAX_PATCH_LINES,
         )
         return False
 
-    # ── Создаём временную копию и применяем патч ──────────────────────────────
+    # ── Строим unified diff для Telegram ──────────────────────────────────────
+    diff_preview = _build_diff_preview(original_code, patched_code, file_rel)
+
+    # ── Сохраняем в БД ────────────────────────────────────────────────────────
+    patch_id = save_pending_patch(
+        plan_id       = plan_id,
+        repo          = repo,
+        file_path     = file_rel,
+        goal          = goal,
+        original_code = original_code,
+        patched_code  = patched_code,
+        diff_preview  = diff_preview,
+    )
+
+    # ── Отправляем в Telegram ─────────────────────────────────────────────────
+    _notify_patch_pending(patch_id, plan_id, file_rel, goal, diff_preview)
+    logger.info("[CodeEvolver] 📬 Патч #%d поставлен в очередь: %s — %s", patch_id, file_rel, goal)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Шаг 2 цикла: применение одобренных патчей
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_approved_patches() -> Tuple[int, int]:
+    """
+    Применяет все патчи со статусом 'approved'.
+    Требует прохождения pytest; при провале — rollback.
+
+    Returns:
+        (success_count, fail_count)
+    """
+    approved = get_approved_patches()
+    if not approved:
+        return 0, 0
+
+    logger.info("[CodeEvolver] Одобренных патчей к применению: %d", len(approved))
+    success = 0
+    fail    = 0
+
+    for patch in approved:
+        ok = _apply_approved_patch(patch)
+        if ok:
+            success += 1
+        else:
+            fail += 1
+
+    return success, fail
+
+
+def _apply_approved_patch(patch: Dict) -> bool:
+    """
+    Применяет одобренный патч: tmpfile → pytest → git commit или rollback.
+    Обновляет статус в pending_patches и записывает в applied_changes.
+
+    Returns True если патч применён успешно.
+    """
+    patch_id  = patch["id"]
+    file_rel  = patch["file_path"]
+    goal      = patch["goal"]
+    plan_id   = patch["plan_id"]
+    repo      = patch.get("repo", "ShortsProject")
+
+    file_path = config.SHORTS_PROJECT_DIR / file_rel
+    if not file_path.exists():
+        logger.warning("[CodeEvolver] Файл не найден при применении: %s", file_path)
+        mark_patch_failed(patch_id, "файл не найден")
+        return False
+
+    patched_code = patch["patched_code"]
+
+    # ── Создаём временную копию ───────────────────────────────────────────────
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", encoding="utf-8", delete=False
     ) as tmp_f:
@@ -137,8 +216,6 @@ def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         tmp_f.write(patched_code)
 
     try:
-        # ── Запускаем тесты на временном файле ───────────────────────────────
-        # Подменяем оригинальный файл временным, гоняем pytest, откатываем
         backup_path = file_path.with_suffix(".py.bak")
         shutil.copy2(file_path, backup_path)
 
@@ -149,13 +226,11 @@ def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
             test_ok     = False
             test_output = str(exc)
         finally:
-            # Откатываем в любом случае, потом решаем: оставить или нет
             if not test_ok:
                 shutil.copy2(backup_path, file_path)
 
         # ── Решение по результатам тестов ─────────────────────────────────────
         if test_ok:
-            # Заменяем оригинал патченым файлом (уже сделано выше через copy2)
             shutil.copy2(tmp_path, file_path)
 
             git_tools.commit_change(
@@ -176,28 +251,33 @@ def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
                 rolled_back = False,
             )
 
+            mark_patch_applied(patch_id, test_output[:500])
             record_success("code", goal)
-            logger.info("[CodeEvolver] ✅ Патч применён: %s — %s", file_rel, goal)
+
+            logger.info("[CodeEvolver] ✅ Патч #%d применён: %s — %s", patch_id, file_rel, goal)
+            _notify_patch_applied(patch_id, file_rel, goal)
             backup_path.unlink(missing_ok=True)
             return True
 
         else:
-            # Rollback уже сделан в finally выше
             save_applied_change(
-                plan_id        = plan_id,
-                change_type    = "code_patch",
-                repo           = repo,
-                zone           = "code",
-                description    = goal,
-                file_path      = file_rel,
-                test_status    = "failed",
-                test_output    = test_output[:2000],
-                rolled_back    = True,
-                rollback_reason= "pytest провалил тесты",
+                plan_id         = plan_id,
+                change_type     = "code_patch",
+                repo            = repo,
+                zone            = "code",
+                description     = goal,
+                file_path       = file_rel,
+                test_status     = "failed",
+                test_output     = test_output[:2000],
+                rolled_back     = True,
+                rollback_reason = "pytest провалил тесты",
             )
 
+            mark_patch_failed(patch_id, test_output[:500])
             record_failure("code", f"тесты упали: {goal}")
-            logger.warning("[CodeEvolver] ❌ Патч отклонён (тесты): %s — %s", file_rel, goal)
+
+            logger.warning("[CodeEvolver] ❌ Патч #%d провалил тесты: %s — %s", patch_id, file_rel, goal)
+            _notify_patch_failed(patch_id, file_rel, goal, test_output)
             backup_path.unlink(missing_ok=True)
             return False
 
@@ -205,11 +285,74 @@ def _apply_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         tmp_path.unlink(missing_ok=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Краш-луп детектор (без изменений)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_and_revert_on_crash() -> bool:
+    """
+    Проверяет краш-луп агентов ShortsProject.
+    Если краш-луп обнаружен — откатывает последний Orchestrator-коммит в SP через git revert.
+
+    Логика:
+      1. Читает agent_memory.json через get_crash_loop_agents()
+      2. Если есть агент с 3+ restart_requested за последний час —
+         ищет последний коммит [Orchestrator/...] в SP
+      3. Если коммит найден — git revert (создаёт revert-коммит)
+      4. Помечает изменение в БД как rolled_back, пишет в notifier
+
+    Возвращает True если откат был выполнен.
+    """
+    crash_agents = get_crash_loop_agents(
+        window_minutes     = config.CRASH_LOOP_WINDOW_MIN,
+        min_restart_requests = config.CRASH_LOOP_MIN_RESTARTS,
+    )
+    if not crash_agents:
+        return False
+
+    agents_str = ", ".join(crash_agents)
+    logger.warning("[CodeEvolver] Краш-луп обнаружен: %s — ищу последний патч для отката", agents_str)
+
+    commit_hash = git_tools.find_last_orc_commit(config.SHORTS_PROJECT_DIR)
+    if not commit_hash:
+        logger.warning("[CodeEvolver] Краш-луп есть, но Orchestrator-коммитов не найдено — откат невозможен")
+        _notify_crash_no_commit(agents_str)
+        return False
+
+    reverted = git_tools.revert_commit(config.SHORTS_PROJECT_DIR, commit_hash)
+    if not reverted:
+        logger.error("[CodeEvolver] git revert %s не удался", commit_hash)
+        _notify_crash_revert_failed(agents_str, commit_hash)
+        return False
+
+    _mark_last_patch_reverted(crash_agents)
+    record_failure("code", f"краш-луп агентов: {agents_str} → откат {commit_hash}")
+    _notify_crash_reverted(agents_str, commit_hash)
+    logger.info("[CodeEvolver] ✅ Откат %s выполнен (краш-луп: %s)", commit_hash, agents_str)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Вспомогательные
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_diff_preview(original: str, patched: str, filename: str, max_chars: int = 2500) -> str:
+    """Строит unified diff для отображения в Telegram."""
+    diff_lines = list(difflib.unified_diff(
+        original.splitlines(keepends=True),
+        patched.splitlines(keepends=True),
+        fromfile=filename,
+        tofile=f"{filename} (patched)",
+        n=3,
+    ))
+    diff_str = "".join(diff_lines)
+    if len(diff_str) > max_chars:
+        diff_str = diff_str[:max_chars] + "\n...(diff обрезан)"
+    return diff_str
+
+
 def _generate_patched_code(original_code: str, goal: str, file_name: str) -> Optional[str]:
-    """
-    Запрашивает у Qwen-coder изменённую версию файла.
-    Просит вернуть ТОЛЬКО полный код файла без пояснений.
-    """
+    """Запрашивает у Qwen-coder изменённую версию файла."""
     prompt = (
         f"Ты — Python-разработчик. Тебе нужно изменить файл {file_name}.\n"
         f"Цель изменения: {goal}\n\n"
@@ -227,59 +370,28 @@ def _generate_patched_code(original_code: str, goal: str, file_name: str) -> Opt
     if not raw:
         return None
 
-    # Убираем markdown-обёртки если LLM добавила
     import re
     clean = re.sub(r"^```(?:python)?\s*", "", raw.strip())
     clean = re.sub(r"\s*```$", "", clean)
     return clean.strip()
 
 
-def check_and_revert_on_crash() -> bool:
-    """
-    Проверяет краш-луп агентов ShortsProject.
-    Если краш-луп обнаружен — откатывает последний Orchestrator-коммит в SP через git revert.
-
-    Логика:
-      1. Читает agent_memory.json через get_crash_loop_agents()
-      2. Если есть агент с 3+ restart_requested за последний час —
-         ищет последний коммит [Orchestrator/...] в SP
-      3. Если коммит найден — git revert (создаёт revert-коммит)
-      4. Помечает изменение в БД как rolled_back, пишет в notifier
-
-    Возвращает True если откат был выполнен.
-    """
-    crash_agents = get_crash_loop_agents(
-        window_minutes=config.CRASH_LOOP_WINDOW_MIN,
-        min_restart_requests=config.CRASH_LOOP_MIN_RESTARTS,
-    )
-    if not crash_agents:
-        return False
-
-    agents_str = ", ".join(crash_agents)
-    logger.warning("[CodeEvolver] Краш-луп обнаружен: %s — ищу последний патч для отката", agents_str)
-
-    # Ищем последний Orchestrator-коммит в SP
-    commit_hash = git_tools.find_last_orc_commit(config.SHORTS_PROJECT_DIR)
-    if not commit_hash:
-        logger.warning("[CodeEvolver] Краш-луп есть, но Orchestrator-коммитов не найдено — откат невозможен")
-        _notify_crash_no_commit(agents_str)
-        return False
-
-    # Откатываем
-    reverted = git_tools.revert_commit(config.SHORTS_PROJECT_DIR, commit_hash)
-    if not reverted:
-        logger.error("[CodeEvolver] git revert %s не удался", commit_hash)
-        _notify_crash_revert_failed(agents_str, commit_hash)
-        return False
-
-    # Помечаем последнее code_patch изменение как rolled_back
-    _mark_last_patch_reverted(crash_agents)
-
-    record_failure("code", f"краш-луп агентов: {agents_str} → откат {commit_hash}")
-
-    _notify_crash_reverted(agents_str, commit_hash)
-    logger.info("[CodeEvolver] ✅ Откат %s выполнен (краш-луп: %s)", commit_hash, agents_str)
-    return True
+def _run_tests() -> Tuple[bool, str]:
+    """Запускает pytest для ShortsProject. Returns (passed: bool, output: str)."""
+    try:
+        result = subprocess.run(
+            config.SP_PYTEST_CMD,
+            capture_output = True,
+            text           = True,
+            timeout        = 120,
+            cwd            = str(config.SHORTS_PROJECT_DIR),
+        )
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "pytest timeout (120s)"
+    except Exception as exc:
+        return False, f"pytest error: {exc}"
 
 
 def _mark_last_patch_reverted(crash_agents: list) -> None:
@@ -294,12 +406,63 @@ def _mark_last_patch_reverted(crash_agents: list) -> None:
             if row:
                 conn.execute("""
                     UPDATE applied_changes
-                    SET rolled_back = 1,
-                        rollback_reason = ?
+                    SET rolled_back = 1, rollback_reason = ?
                     WHERE id = ?
                 """, (f"краш-луп: {', '.join(crash_agents)}", row["id"]))
     except Exception as exc:
         logger.warning("[CodeEvolver] Не удалось пометить откат в БД: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Telegram-уведомления
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _notify_patch_pending(
+    patch_id: int, plan_id: int, file_rel: str, goal: str, diff_preview: str
+) -> None:
+    from commander import notifier
+    # Экранируем diff для HTML — показываем в <pre> только первые 2000 символов
+    safe_diff = diff_preview[:2000].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    notifier.send_message(
+        f"📝 <b>Code Patch #{patch_id} — план #{plan_id}</b>\n"
+        f"📄 Файл: <code>{file_rel}</code>\n"
+        f"🎯 Цель: {goal}\n\n"
+        f"<pre>{safe_diff}</pre>\n\n"
+        f"✅ <b>/approve_{patch_id}</b> — применить\n"
+        f"❌ <b>/reject_{patch_id}</b> — отклонить"
+    )
+    notifier.log_notification(
+        f"Патч #{patch_id} ожидает одобрения: {file_rel} — {goal}",
+        level="info", category="patch",
+    )
+
+
+def _notify_patch_applied(patch_id: int, file_rel: str, goal: str) -> None:
+    from commander import notifier
+    notifier.send_message(
+        f"✅ <b>Патч #{patch_id} применён</b>\n"
+        f"📄 {file_rel}\n"
+        f"🎯 {goal}"
+    )
+    notifier.log_notification(
+        f"Патч #{patch_id} применён: {file_rel}",
+        level="info", category="patch",
+    )
+
+
+def _notify_patch_failed(patch_id: int, file_rel: str, goal: str, test_output: str) -> None:
+    from commander import notifier
+    short_out = test_output[-500:] if len(test_output) > 500 else test_output
+    notifier.send_message(
+        f"❌ <b>Патч #{patch_id} провалил тесты — откат</b>\n"
+        f"📄 {file_rel}\n"
+        f"🎯 {goal}\n\n"
+        f"<code>{short_out[:400]}</code>"
+    )
+    notifier.log_notification(
+        f"Патч #{patch_id} откатан (тесты): {file_rel}",
+        level="warning", category="patch",
+    )
 
 
 def _notify_crash_reverted(agents_str: str, commit_hash: str) -> None:
@@ -332,25 +495,3 @@ def _notify_crash_revert_failed(agents_str: str, commit_hash: str) -> None:
         f"Краш-луп: <b>{agents_str}</b>\n"
         f"git revert <code>{commit_hash}</code> вернул ошибку — требуется ручное вмешательство."
     )
-
-
-def _run_tests() -> Tuple[bool, str]:
-    """
-    Запускает pytest для ShortsProject.
-    Returns (passed: bool, output: str).
-    """
-    try:
-        result = subprocess.run(
-            config.SP_PYTEST_CMD,
-            capture_output = True,
-            text           = True,
-            timeout        = 120,
-            cwd            = str(config.SHORTS_PROJECT_DIR),
-        )
-        output  = result.stdout + result.stderr
-        passed  = result.returncode == 0
-        return passed, output
-    except subprocess.TimeoutExpired:
-        return False, "pytest timeout (120s)"
-    except Exception as exc:
-        return False, f"pytest error: {exc}"

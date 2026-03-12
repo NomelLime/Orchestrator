@@ -14,6 +14,10 @@ commander/telegram_bot.py — Telegram-бот Orchestrator COMMANDER.
     /zones          → показать состояние зон
     /last_plan      → последний план эволюции
     /status         → статус системы
+    /proxies        → прокси и ожидающие запросы
+    /patches        → список ожидающих патчей кода
+    /approve_N      → одобрить патч #N
+    /reject_N       → отклонить патч #N
     /help           → справка
 
 Экспортирует:
@@ -218,6 +222,93 @@ async def _handle_proxies(update, context) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def _handle_patches(update, context) -> None:
+    """/patches — список ожидающих патчей кода."""
+    from db.patches import get_pending_patches
+    patches = get_pending_patches()
+
+    if not patches:
+        await update.message.reply_text("📋 Нет ожидающих патчей кода.")
+        return
+
+    lines = [f"📋 <b>Ожидают одобрения: {len(patches)} патч(ей)</b>\n"]
+    for p in patches:
+        lines.append(
+            f"  <b>#{p['id']}</b> — <code>{p['file_path']}</code>\n"
+            f"  🎯 {p['goal'][:80]}\n"
+            f"  План #{p['plan_id']} | {p['created_at'][:16]}\n"
+            f"  ✅ /approve_{p['id']}  ❌ /reject_{p['id']}\n"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def _handle_approve(update, context) -> None:
+    """/approve_N — одобрить патч #N."""
+    from db.patches import mark_patch_approved, get_patch
+    text = (update.message.text or "").strip()
+
+    # Извлекаем ID: /approve_7 → 7
+    try:
+        patch_id = int(text.split("_", 1)[1].split()[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("⚠️ Использование: /approve_7 (укажи номер патча)")
+        return
+
+    patch = get_patch(patch_id)
+    if not patch:
+        await update.message.reply_text(f"⚠️ Патч #{patch_id} не найден.")
+        return
+
+    ok = mark_patch_approved(patch_id)
+    if ok:
+        await update.message.reply_text(
+            f"✅ <b>Патч #{patch_id} одобрен</b>\n"
+            f"Файл: <code>{patch['file_path']}</code>\n"
+            f"Будет применён в следующем цикле Orchestrator.",
+            parse_mode="HTML"
+        )
+        logger.info("[TelegramBot] Оператор одобрил патч #%d: %s", patch_id, patch['file_path'])
+    else:
+        await update.message.reply_text(
+            f"⚠️ Патч #{patch_id} не удалось одобрить "
+            f"(статус: {patch.get('status', '?')} — возможно уже обработан)."
+        )
+
+
+async def _handle_reject(update, context) -> None:
+    """/reject_N — отклонить патч #N."""
+    from db.patches import mark_patch_rejected, get_patch
+    text = (update.message.text or "").strip()
+
+    # Извлекаем ID: /reject_7 → 7
+    try:
+        patch_id = int(text.split("_", 1)[1].split()[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("⚠️ Использование: /reject_7 (укажи номер патча)")
+        return
+
+    patch = get_patch(patch_id)
+    if not patch:
+        await update.message.reply_text(f"⚠️ Патч #{patch_id} не найден.")
+        return
+
+    ok = mark_patch_rejected(patch_id)
+    if ok:
+        await update.message.reply_text(
+            f"❌ <b>Патч #{patch_id} отклонён</b>\n"
+            f"Файл: <code>{patch['file_path']}</code>\n"
+            f"Код не будет изменён.",
+            parse_mode="HTML"
+        )
+        logger.info("[TelegramBot] Оператор отклонил патч #%d: %s", patch_id, patch['file_path'])
+    else:
+        await update.message.reply_text(
+            f"⚠️ Патч #{patch_id} не удалось отклонить "
+            f"(статус: {patch.get('status', '?')} — возможно уже обработан)."
+        )
+
+
 async def _handle_help(update, context) -> None:
     """/help — справка."""
     await update.message.reply_text(
@@ -227,6 +318,9 @@ async def _handle_help(update, context) -> None:
         "/last_plan — последний план эволюции\n"
         "/status — статус системы\n"
         "/proxies — прокси и ожидающие запросы\n"
+        "/patches — ожидающие патчи кода\n"
+        "/approve_N — одобрить патч #N\n"
+        "/reject_N — отклонить патч #N\n"
         "/help — эта справка\n\n"
         "<b>Подтверждение прокси:</b>\n"
         "  да 7 — выполнить запрос #7\n"
@@ -263,7 +357,20 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("last_plan", _handle_last_plan))
     app.add_handler(CommandHandler("status",    _handle_status))
     app.add_handler(CommandHandler("proxies",   _handle_proxies))
+    app.add_handler(CommandHandler("patches",   _handle_patches))
     app.add_handler(CommandHandler("help",      _handle_help))
+    # /approve_N и /reject_N — динамические команды с суффиксом ID
+    # python-telegram-bot CommandHandler принимает команды с аргументами,
+    # но /approve_7 парсится как команда "approve_7" (без аргументов).
+    # Используем filters.Regex для перехвата паттерна /approve_\d+ и /reject_\d+
+    app.add_handler(MessageHandler(
+        filters.COMMAND & filters.Regex(r"^/approve_\d+"),
+        _handle_approve,
+    ))
+    app.add_handler(MessageHandler(
+        filters.COMMAND & filters.Regex(r"^/reject_\d+"),
+        _handle_reject,
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
 
     logger.info("[TelegramBot] Запуск polling...")

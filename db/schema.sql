@@ -184,3 +184,28 @@ CREATE INDEX IF NOT EXISTS idx_metrics_snapshots_time
 
 CREATE INDEX IF NOT EXISTS idx_notifications_digest
     ON notifications(included_in_digest, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 9: Ожидающие патчи кода (требуют одобрения оператора в Telegram)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Жизненный цикл: pending → approved/rejected → applied/failed
+
+CREATE TABLE IF NOT EXISTS pending_patches (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    plan_id         INTEGER REFERENCES evolution_plans(id),
+    repo            TEXT NOT NULL DEFAULT 'ShortsProject',
+    file_path       TEXT NOT NULL,              -- относительный путь (pipeline/agents/...)
+    goal            TEXT NOT NULL,              -- цель патча (одна строка)
+    original_code   TEXT NOT NULL,              -- исходный код до патча
+    patched_code    TEXT NOT NULL,              -- код после патча (от LLM)
+    diff_preview    TEXT,                       -- unified diff (для Telegram)
+    status          TEXT NOT NULL DEFAULT 'pending',
+    -- 'pending' | 'approved' | 'rejected' | 'applied' | 'failed'
+    approved_at     TEXT,
+    applied_at      TEXT,
+    apply_result    TEXT                        -- вывод pytest или причина ошибки
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_patches_status
+    ON pending_patches(status, created_at DESC);

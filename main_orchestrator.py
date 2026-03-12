@@ -160,24 +160,38 @@ def run_cycle(cycle_num: int = 0) -> None:
                 level="info" if cfg_fail == 0 else "warning"
             )
 
-        # ── Шаг 6: Применение патчей кода ────────────────────────────────────
-        logger.info("[6/7] Применение code_patches (Zone 4)...")
-        code_ok, code_fail = code_evolver.apply_code_patches(plan, plan_id)
-        logger.info("  Патчи: успешно=%d, откатов=%d", code_ok, code_fail)
+        # ── Шаг 6: Патчи кода (двухшаговый: одобрение → применение) ─────────
+        logger.info("[6/7] Code patches (Zone 4)...")
+
+        # 6a. Применяем ранее одобренные патчи (из прошлых циклов)
+        code_ok, code_fail = code_evolver.apply_approved_patches()
         if code_ok or code_fail:
+            logger.info("  Одобренные патчи применены: успешно=%d, откатов=%d", code_ok, code_fail)
             notifier.log_notification(
-                f"Code patches план #{plan_id}: +{code_ok} откатов:{code_fail}",
+                f"Code patches применены: +{code_ok} откатов:{code_fail}",
                 category="patch",
                 level="info" if code_fail == 0 else "warning"
             )
 
-        # Помечаем план
+        # 6b. Ставим в очередь новые патчи из текущего плана → уведомление в Telegram
+        queued = code_evolver.queue_code_patches(plan, plan_id)
+        if queued:
+            logger.info("  Новых патчей поставлено в очередь: %d (ожидают /approve_N)", queued)
+            notifier.log_notification(
+                f"Plan #{plan_id}: {queued} патч(ей) ожидают одобрения в Telegram",
+                category="patch",
+                level="info"
+            )
+
+        # Помечаем план: считаем config_changes + применённые code_patches
+        # queued-патчи не считаются применёнными — они ожидают одобрения
         total_ok   = cfg_ok + code_ok
         total_fail = cfg_fail + code_fail
         if total_ok > 0:
             mark_plan_applied(plan_id)
         elif total_fail > 0:
             mark_plan_failed(plan_id)
+        # Если только queued (без cfg_ok/code_ok) — план остаётся pending до применения
 
         # ── Шаг 7: Суточный дайджест ─────────────────────────────────────────
         logger.info("[7/7] Проверка суточного дайджеста...")

@@ -16,6 +16,7 @@ import logging
 from typing import Optional
 
 import config
+from integrations.shared_gpu_lock import acquire_gpu_lock
 
 logger = logging.getLogger(__name__)
 
@@ -25,23 +26,21 @@ def call_llm(model: str, prompt: str) -> Optional[str]:
     Отправляет промпт в Ollama и возвращает текст ответа.
     Возвращает None при любой ошибке (недоступность, таймаут, пустой ответ).
 
-    Примечание по ресурсам:
-        Ollama сама управляет VRAM. При OLLAMA_HOST=localhost она запустит
-        модель в VRAM (или в RAM через offloading если VRAM недостаточно).
-        Orchestrator не держит модель загруженной между вызовами.
+    Использует cross-project GPU lock (shared_gpu_lock.py) чтобы не конкурировать
+    с ShortsProject VL-активностью за VRAM.
     """
     try:
         import ollama as _ollama
 
-        response = _ollama.generate(
-            model   = model,
-            prompt  = prompt,
-            options = {
-                "temperature": 0.3,     # низкая температура = более детерминированный вывод
-                "num_predict": 2048,    # лимит токенов ответа
-            },
-            # TODO: передавать host из config когда ollama SDK поддержит это в generate()
-        )
+        with acquire_gpu_lock(consumer=f"Orchestrator-{model}", timeout=120):
+            response = _ollama.generate(
+                model   = model,
+                prompt  = prompt,
+                options = {
+                    "temperature": 0.3,     # низкая температура = более детерминированный вывод
+                    "num_predict": 2048,    # лимит токенов ответа
+                },
+            )
 
         raw = (response.get("response") or "").strip()
         if not raw:

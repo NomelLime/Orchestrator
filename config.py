@@ -141,6 +141,26 @@ CRASH_LOOP_WINDOW_MIN    = int(os.getenv("ORC_CRASH_WINDOW_MIN", "60"))
 CRASH_LOOP_MIN_RESTARTS  = int(os.getenv("ORC_CRASH_MIN_RESTARTS", "3"))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ShortsProject Pipeline Runner
+# Orchestrator запускает run_pipeline.py как subprocess и управляет им
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Включить автоматический запуск SP pipeline
+SP_PIPELINE_ENABLED = os.getenv("ORC_SP_PIPELINE", "true").lower() == "true"
+
+# Минимальный интервал между запусками pipeline (часы) — защита от спама
+SP_PIPELINE_INTERVAL_HOURS = int(os.getenv("ORC_SP_INTERVAL_HOURS", "6"))
+
+# Порог глубины upload_queue: если суммарно по всем аккаунтам меньше N видео → запуск
+SP_PIPELINE_QUEUE_THRESHOLD = int(os.getenv("ORC_SP_QUEUE_THRESHOLD", "5"))
+
+# Максимальное время выполнения pipeline (часы) — после этого считаем зависшим → алерт
+SP_PIPELINE_MAX_DURATION_HOURS = int(os.getenv("ORC_SP_MAX_HOURS", "4"))
+
+# PID-файл для хранения PID между перезапусками Orchestrator
+SP_PIPELINE_PID_FILE = BASE_DIR / "data" / ".sp_pipeline.pid"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Режим безопасности
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -10,7 +10,8 @@ main_orchestrator.py — Главный цикл Orchestrator.
     2. Обработка команд оператора из Telegram (pending → applied)
     3. Сбор метрик из ShortsProject и PreLend → metrics_snapshots
     3.5 Проверка краш-лупа агентов SP → автооткат последнего патча
-    3.6 Проверка прокси/баланса (раз в SUPPLY_CHECK_EVERY_N_CYCLES циклов)
+    3.6 SP Pipeline manager: запуск run_pipeline.py если очередь низкая
+    3.7 Проверка прокси/баланса (раз в SUPPLY_CHECK_EVERY_N_CYCLES циклов)
     4. LLM-анализ + генерация плана → evolution_plans
     5. Применение config_changes (Zone 1, 2)
     6. Применение code_patches (Zone 4, только Python/SP)
@@ -31,9 +32,10 @@ from pathlib import Path
 import portalocker
 
 import config
+import startup_check
 from db.connection   import init_db
 from modules         import tracking, zones as zones_module, evolution, policies
-from modules         import config_enforcer, code_evolver, evaluator, supply_tracker
+from modules         import config_enforcer, code_evolver, evaluator, supply_tracker, sp_runner
 from commander       import notifier
 from commander       import telegram_bot
 from db.experiences  import mark_plan_applied, mark_plan_failed
@@ -103,19 +105,24 @@ def run_cycle(cycle_num: int = 0) -> None:
 
         # ── Шаг 3.5: Краш-луп детектор ───────────────────────────────────────
         reverted = code_evolver.check_and_revert_on_crash()
+
         if reverted:
             logger.warning("[3.5/7] Краш-луп: автооткат выполнен — пропускаем генерацию плана")
             return
 
-        # ── Шаг 3.6: Мониторинг прокси (раз в N циклов) ──────────────────────
+        # ── Шаг 3.6: SP Pipeline manager ─────────────────────────────────────
+        logger.info("[3.6/8] SP Pipeline manager...")
+        sp_runner.manage_sp_pipeline(metrics_data)
+
+        # ── Шаг 3.7: Мониторинг прокси (раз в N циклов) ──────────────────────
         if cycle_num % config.SUPPLY_CHECK_EVERY_N_CYCLES == 0:
-            logger.info("[3.6/7] Проверка прокси/баланса...")
+            logger.info("[3.7/8] Проверка прокси/баланса...")
             supply_requests = supply_tracker.check_supply(sp)
             if supply_requests:
                 logger.info("  Отправлено запросов оператору: %d", supply_requests)
 
         # ── Шаг 4: Генерация плана ───────────────────────────────────────────
-        logger.info("[4/7] Генерация плана эволюции (LLM)...")
+        logger.info("[4/8] Генерация плана эволюции (LLM)...")
         plan = evolution.generate_plan(metrics_data)
 
         if not plan:
@@ -150,7 +157,7 @@ def run_cycle(cycle_num: int = 0) -> None:
             time.sleep(config.PLAN_APPLY_DELAY_SEC)
 
         # ── Шаг 5: Применение конфиг-изменений ───────────────────────────────
-        logger.info("[5/7] Применение config_changes...")
+        logger.info("[5/8] Применение config_changes...")
         cfg_ok, cfg_fail = config_enforcer.apply_config_changes(plan, plan_id)
         logger.info("  Конфиги: успешно=%d, ошибок=%d", cfg_ok, cfg_fail)
         if cfg_ok or cfg_fail:
@@ -161,7 +168,7 @@ def run_cycle(cycle_num: int = 0) -> None:
             )
 
         # ── Шаг 6: Патчи кода (двухшаговый: одобрение → применение) ─────────
-        logger.info("[6/7] Code patches (Zone 4)...")
+        logger.info("[6/8] Code patches (Zone 4)...")
 
         # 6a. Применяем ранее одобренные патчи (из прошлых циклов)
         code_ok, code_fail = code_evolver.apply_approved_patches()
@@ -194,7 +201,7 @@ def run_cycle(cycle_num: int = 0) -> None:
         # Если только queued (без cfg_ok/code_ok) — план остаётся pending до применения
 
         # ── Шаг 7: Суточный дайджест ─────────────────────────────────────────
-        logger.info("[7/7] Проверка суточного дайджеста...")
+        logger.info("[7/8] Проверка суточного дайджеста...")
         notifier.send_daily_digest_if_due()
 
     except Exception as exc:
@@ -219,6 +226,9 @@ def main() -> None:
                 config.CYCLE_INTERVAL_HOURS,
                 config.SHORTS_PROJECT_DIR,
                 config.PRELEND_DIR)
+
+    # Проверка зависимостей — при критических ошибках выходим сразу
+    startup_check.run_checks(abort_on_fail=True)
 
     # Инициализация БД (идемпотентно — безопасно запускать повторно)
     init_db()

@@ -146,7 +146,8 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         kv = memory.get("kv", {})
 
         # Считаем бан-события из KV (Guardian логирует бан-сигналы)
-        ban_keys = [k for k in kv if "ban" in k.lower()]
+        # Точный префикс "ban_" или ключ "ban" — избегаем ложных срабатываний на "banner", "bandwidth"
+        ban_keys = [k for k in kv if k.lower().startswith("ban_") or k.lower() == "ban"]
         result["ban_count"] = len(ban_keys)
 
         # Рекомендации Strategist: ключи вида "rec.strategist.<agent>"

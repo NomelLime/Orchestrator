@@ -105,7 +105,16 @@ def _queue_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         logger.warning("[CodeEvolver] Пустой file или goal в патче")
         return False
 
-    file_path = config.SHORTS_PROJECT_DIR / file_rel
+    # Защита от path traversal — LLM не должна выходить за пределы SP
+    file_path = (config.SHORTS_PROJECT_DIR / file_rel).resolve()
+    try:
+        file_path.relative_to(config.SHORTS_PROJECT_DIR.resolve())
+    except ValueError:
+        logger.error(
+            "[CodeEvolver] Path traversal отклонён: %s выходит за пределы ShortsProject", file_rel
+        )
+        return False
+
     if not file_path.exists():
         logger.warning("[CodeEvolver] Файл не найден: %s", file_path)
         return False
@@ -128,12 +137,20 @@ def _queue_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         logger.warning("[CodeEvolver] LLM не вернула патч для %s", file_rel)
         return False
 
-    # Проверка размера патча
-    delta_lines = abs(patched_code.count("\n") - original_code.count("\n"))
-    if delta_lines > config.CODE_EVOLVER_MAX_PATCH_LINES:
+    # Проверка размера патча — считаем реально изменённые строки через unified_diff
+    diff_lines = list(difflib.unified_diff(
+        original_code.splitlines(keepends=True),
+        patched_code.splitlines(keepends=True),
+        n=0,
+    ))
+    changed_lines = sum(
+        1 for ln in diff_lines
+        if (ln.startswith("+") or ln.startswith("-")) and not ln.startswith(("+++", "---"))
+    )
+    if changed_lines > config.CODE_EVOLVER_MAX_PATCH_LINES:
         logger.warning(
-            "[CodeEvolver] Патч слишком большой (%d строк > лимит %d) — отклонён",
-            delta_lines, config.CODE_EVOLVER_MAX_PATCH_LINES,
+            "[CodeEvolver] Патч слишком большой (%d изменённых строк > лимит %d) — отклонён",
+            changed_lines, config.CODE_EVOLVER_MAX_PATCH_LINES,
         )
         return False
 
@@ -200,7 +217,15 @@ def _apply_approved_patch(patch: Dict) -> bool:
     plan_id   = patch["plan_id"]
     repo      = patch.get("repo", "ShortsProject")
 
-    file_path = config.SHORTS_PROJECT_DIR / file_rel
+    # Защита от path traversal при применении
+    file_path = (config.SHORTS_PROJECT_DIR / file_rel).resolve()
+    try:
+        file_path.relative_to(config.SHORTS_PROJECT_DIR.resolve())
+    except ValueError:
+        logger.error("[CodeEvolver] Path traversal при применении: %s", file_rel)
+        mark_patch_failed(patch_id, "path traversal отклонён")
+        return False
+
     if not file_path.exists():
         logger.warning("[CodeEvolver] Файл не найден при применении: %s", file_path)
         mark_patch_failed(patch_id, "файл не найден")
@@ -219,6 +244,7 @@ def _apply_approved_patch(patch: Dict) -> bool:
         backup_path = file_path.with_suffix(".py.bak")
         shutil.copy2(file_path, backup_path)
 
+        # Тестируем на КОПИИ: подменяем файл → pytest → откат если провал
         try:
             shutil.copy2(tmp_path, file_path)
             test_ok, test_output = _run_tests()
@@ -226,11 +252,12 @@ def _apply_approved_patch(patch: Dict) -> bool:
             test_ok     = False
             test_output = str(exc)
         finally:
-            if not test_ok:
-                shutil.copy2(backup_path, file_path)
+            # Всегда восстанавливаем оригинал после тестов
+            shutil.copy2(backup_path, file_path)
 
         # ── Решение по результатам тестов ─────────────────────────────────────
         if test_ok:
+            # Записываем патч только ПОСЛЕ успешного прохождения тестов
             shutil.copy2(tmp_path, file_path)
 
             git_tools.commit_change(

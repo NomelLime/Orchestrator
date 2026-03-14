@@ -297,14 +297,27 @@ def _parse_plan(raw: str) -> Optional[Dict]:
     # Убираем ```json ... ``` обёртки
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
 
-    # Ищем первый {...} блок (жадный поиск — берём самый большой)
-    # Используем сбалансированный поиск через счётчик скобок
+    # Ищем первый {...} блок — сбалансированный поиск с учётом строкового контекста.
+    # Скобки внутри JSON-строк ("...{...}...") не влияют на счётчик глубины.
     start = clean.find("{")
     if start == -1:
         return None
 
-    depth = 0
+    depth   = 0
+    in_str  = False
+    escaped = False
     for i, ch in enumerate(clean[start:], start):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
         if ch == "{":
             depth += 1
         elif ch == "}":

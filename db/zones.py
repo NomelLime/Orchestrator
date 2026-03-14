@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 ZONE_NAMES = ("scheduling", "visual", "prelend", "code")
 
+# Дата последнего применения деградации — не более одного раза в сутки
+_last_decay_date: Optional[str] = None
+
 
 def get_zone(zone_name: str) -> Optional[Dict]:
     """Возвращает состояние зоны или None если зона не найдена."""
@@ -125,10 +128,16 @@ def apply_zone_decay() -> None:
         Если last_applied_at IS NULL или (now - last_applied_at) > ZONE_DECAY_DAYS дней
         → снижаем score на ZONE_DECAY_PER_DAY за каждый день сверх порога.
 
-    Вызывается в начале каждого цикла Orchestrator.
+    Вызывается в начале каждого цикла Orchestrator, но выполняется не чаще одного раза в сутки.
     """
+    global _last_decay_date
+    now      = datetime.now()
+    today    = now.date().isoformat()
+    if _last_decay_date == today:
+        return
+    _last_decay_date = today
+
     all_zones = get_all_zones()
-    now       = datetime.now()
 
     for zone_name, zone in all_zones.items():
         last_applied = zone.get("last_applied_at")

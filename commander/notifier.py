@@ -87,9 +87,9 @@ def send_daily_digest_if_due() -> bool:
     now      = datetime.now()
     today    = date.today().isoformat()
 
-    # Проверяем время
-    target_h, target_m = map(int, config.DAILY_DIGEST_TIME.split(":"))
-    if not (now.hour == target_h and now.minute == target_m):
+    # Проверяем время — сравниваем только часы (цикл почасовой, точный минутный матч ненадёжен)
+    target_h = int(config.DAILY_DIGEST_TIME.split(":")[0])
+    if now.hour != target_h:
         return False
 
     # Проверяем, не отправляли ли сегодня

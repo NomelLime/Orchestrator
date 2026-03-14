@@ -245,6 +245,7 @@ def main() -> None:
             lock_file = open(str(config.CYCLE_LOCK_FILE), "w")
             portalocker.lock(lock_file, portalocker.LOCK_EX | portalocker.LOCK_NB)
         except portalocker.AlreadyLocked:
+            lock_file.close()
             logger.warning("[Orchestrator] Другой цикл ещё выполняется — пропускаем")
             time.sleep(60)
             continue

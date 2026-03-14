@@ -80,11 +80,10 @@ def commit_change(repo_dir: Path, file_path: Path, message: str) -> bool:
     except ValueError:
         rel_path = str(file_path)
 
-    full_message = f"{message}\n\nAuthor: {config.GIT_AUTHOR}"
-    return _do_commit(repo_dir, [rel_path], full_message)
+    return _do_commit(repo_dir, [rel_path], message, author=config.GIT_AUTHOR)
 
 
-def _do_commit(repo_dir: Path, files: list, message: str) -> bool:
+def _do_commit(repo_dir: Path, files: list, message: str, author: str = "") -> bool:
     """Внутренний helper: git add files + git commit."""
     # git add
     add_result = _run_git(["add"] + files, cwd=repo_dir)
@@ -93,7 +92,10 @@ def _do_commit(repo_dir: Path, files: list, message: str) -> bool:
         return False
 
     # git commit
-    commit_result = _run_git(["commit", "-m", message], cwd=repo_dir)
+    commit_cmd = ["commit", "-m", message]
+    if author:
+        commit_cmd += ["--author", author]
+    commit_result = _run_git(commit_cmd, cwd=repo_dir)
     if commit_result.returncode != 0:
         # "nothing to commit" — не ошибка
         if "nothing to commit" in commit_result.stdout + commit_result.stderr:

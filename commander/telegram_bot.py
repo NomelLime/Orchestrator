@@ -41,6 +41,23 @@ from db.commands   import is_zone_frozen
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Авторизация
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_authorized(update) -> bool:
+    """
+    Проверяет что входящее сообщение от авторизованного chat_id.
+    Если ORC_TG_CHAT_ID не задан — режим разработки, пропускаем всех.
+    """
+    if not config.TELEGRAM_CHAT_ID:
+        return True
+    try:
+        return str(update.effective_chat.id) == str(config.TELEGRAM_CHAT_ID)
+    except Exception:
+        return False
+
+
 def _get_application():
     """Создаёт telegram Application. Вынесено для ленивого импорта."""
     try:
@@ -62,6 +79,8 @@ async def _handle_text(update, context) -> None:
       'да <id>' / 'нет <id>' → подтверждение/отклонение proxy_event
       Всё остальное → сохраняется в operator_commands
     """
+    if not _is_authorized(update):
+        return
     from modules.supply_tracker import confirm_purchase, reject_purchase, get_pending_purchase
 
     text  = (update.message.text or "").strip()
@@ -115,6 +134,8 @@ async def _handle_text(update, context) -> None:
 
 async def _handle_zones(update, context) -> None:
     """/zones — состояние зон доверия."""
+    if not _is_authorized(update):
+        return
     zones = get_all_zones()
     lines = ["📊 <b>Зоны доверия Orchestrator:</b>\n"]
     icons = {True: "✅", False: "⛔"}
@@ -135,6 +156,8 @@ async def _handle_zones(update, context) -> None:
 
 async def _handle_last_plan(update, context) -> None:
     """/last_plan — последний план эволюции."""
+    if not _is_authorized(update):
+        return
     from db.connection import get_db
     with get_db() as conn:
         row = conn.execute(
@@ -157,6 +180,8 @@ async def _handle_last_plan(update, context) -> None:
 
 async def _handle_status(update, context) -> None:
     """/status — общий статус системы."""
+    if not _is_authorized(update):
+        return
     sp_snap = get_latest_snapshot("ShortsProject")
     pl_snap = get_latest_snapshot("PreLend")
 
@@ -190,6 +215,8 @@ async def _handle_status(update, context) -> None:
 
 async def _handle_proxies(update, context) -> None:
     """/proxies — список прокси и ожидающие запросы."""
+    if not _is_authorized(update):
+        return
     from integrations.proxy_manager import get_my_proxies, get_balance
     from modules.supply_tracker import get_pending_purchase
 
@@ -224,6 +251,8 @@ async def _handle_proxies(update, context) -> None:
 
 async def _handle_patches(update, context) -> None:
     """/patches — список ожидающих патчей кода."""
+    if not _is_authorized(update):
+        return
     from db.patches import get_pending_patches
     patches = get_pending_patches()
 
@@ -245,6 +274,8 @@ async def _handle_patches(update, context) -> None:
 
 async def _handle_approve(update, context) -> None:
     """/approve_N — одобрить патч #N."""
+    if not _is_authorized(update):
+        return
     from db.patches import mark_patch_approved, get_patch
     text = (update.message.text or "").strip()
 
@@ -278,6 +309,8 @@ async def _handle_approve(update, context) -> None:
 
 async def _handle_reject(update, context) -> None:
     """/reject_N — отклонить патч #N."""
+    if not _is_authorized(update):
+        return
     from db.patches import mark_patch_rejected, get_patch
     text = (update.message.text or "").strip()
 
@@ -311,6 +344,8 @@ async def _handle_reject(update, context) -> None:
 
 async def _handle_help(update, context) -> None:
     """/help — справка."""
+    if not _is_authorized(update):
+        return
     await update.message.reply_text(
         "🤖 <b>Orchestrator COMMANDER</b>\n\n"
         "<b>Команды:</b>\n"

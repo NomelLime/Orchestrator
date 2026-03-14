@@ -108,12 +108,40 @@ def _parse_command_with_llm(raw_text: str) -> Optional[Dict]:
 
     import re
     clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-    match = re.search(r"\{[^{}]*\}", clean, re.DOTALL)
-    if not match:
+
+    # Balanced-brace parser с учётом строкового контекста.
+    # Скобки внутри JSON-строк ("...{...}...") не влияют на счётчик глубины.
+    start = clean.find("{")
+    if start == -1:
         return None
+    depth    = 0
+    in_str   = False
+    escaped  = False
+    end      = start
+    for i, ch in enumerate(clean[start:], start):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    else:
+        return None  # незакрытый объект
 
     try:
-        return json.loads(match.group())
+        return json.loads(clean[start:end + 1])
     except json.JSONDecodeError:
         return None
 

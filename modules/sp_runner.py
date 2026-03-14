@@ -163,14 +163,18 @@ def _start() -> bool:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(str(log_path), "a", encoding="utf-8")
-        _process = subprocess.Popen(
-            [sys.executable, str(run_pipeline)],
-            cwd=str(config.SHORTS_PROJECT_DIR),
-            stdout=log_file,
-            stderr=log_file,
-            # Новый процесс не привязан к Orchestrator — переживёт его перезапуск
-            close_fds=True,
-        )
+        try:
+            _process = subprocess.Popen(
+                [sys.executable, str(run_pipeline)],
+                cwd=str(config.SHORTS_PROJECT_DIR),
+                stdout=log_file,
+                stderr=log_file,
+                # Новый процесс не привязан к Orchestrator — переживёт его перезапуск
+                close_fds=True,
+            )
+        finally:
+            # Закрываем Python-дескриптор — subprocess уже унаследовал fd
+            log_file.close()
         _started_at = time.time()
         _save_pid(_process.pid, _started_at)
 

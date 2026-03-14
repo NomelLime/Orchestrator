@@ -16,6 +16,9 @@ from db.connection import get_db
 logger = logging.getLogger(__name__)
 
 
+MAX_PENDING_PATCHES = 20  # Максимум ожидающих патчей — защита от накопления
+
+
 def save_pending_patch(
     plan_id: int,
     repo: str,
@@ -27,6 +30,17 @@ def save_pending_patch(
 ) -> int:
     """Сохраняет патч в статусе 'pending'. Возвращает ID записи."""
     with get_db() as conn:
+        # Проверяем лимит ожидающих патчей
+        count = conn.execute(
+            "SELECT COUNT(*) FROM pending_patches WHERE status IN ('pending', 'approved')"
+        ).fetchone()[0]
+        if count >= MAX_PENDING_PATCHES:
+            logger.warning(
+                "[Patches] Лимит ожидающих патчей (%d) достигнут — новый патч отклонён",
+                MAX_PENDING_PATCHES,
+            )
+            return -1
+
         cur = conn.execute("""
             INSERT INTO pending_patches
                 (plan_id, repo, file_path, goal, original_code, patched_code, diff_preview, status)

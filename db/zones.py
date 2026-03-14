@@ -90,16 +90,23 @@ def update_zone_score(
         if mark_applied:
             update_fields["last_applied_at"] = now_iso
 
-        conn.execute("""
-            UPDATE zones
-            SET confidence_score = :confidence_score,
-                enabled          = :enabled,
-                last_changed_at  = :last_changed_at
-                {applied_clause}
-            WHERE zone_name = :zone_name
-        """.format(
-            applied_clause=", last_applied_at = :last_applied_at" if mark_applied else ""
-        ), {**update_fields, "zone_name": zone_name})
+        if mark_applied:
+            conn.execute("""
+                UPDATE zones
+                SET confidence_score = :confidence_score,
+                    enabled          = :enabled,
+                    last_changed_at  = :last_changed_at,
+                    last_applied_at  = :last_applied_at
+                WHERE zone_name = :zone_name
+            """, {**update_fields, "zone_name": zone_name})
+        else:
+            conn.execute("""
+                UPDATE zones
+                SET confidence_score = :confidence_score,
+                    enabled          = :enabled,
+                    last_changed_at  = :last_changed_at
+                WHERE zone_name = :zone_name
+            """, {**update_fields, "zone_name": zone_name})
 
     logger.debug("[Zones] %s: score %d→%d (%+d) %s",
                  zone_name, old_score, new_score, delta, reason)
@@ -167,8 +174,10 @@ def is_zone_active(zone_name: str) -> bool:
     Возвращает True если зона включена И не заморожена оператором.
     Это главная проверка перед применением любого изменения.
     """
-    # TODO: добавить проверку operator_policies на 'freeze_zone_<name>'
+    from db.commands import is_zone_frozen
     zone = get_zone(zone_name)
     if not zone:
+        return False
+    if is_zone_frozen(zone_name):
         return False
     return bool(zone["enabled"])

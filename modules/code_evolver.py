@@ -167,6 +167,9 @@ def _queue_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         patched_code  = patched_code,
         diff_preview  = diff_preview,
     )
+    if patch_id < 0:
+        logger.warning("[CodeEvolver] Лимит ожидающих патчей достигнут — %s пропущен", file_rel)
+        return False
 
     # ── Отправляем в Telegram ─────────────────────────────────────────────────
     _notify_patch_pending(patch_id, plan_id, file_rel, goal, diff_preview)

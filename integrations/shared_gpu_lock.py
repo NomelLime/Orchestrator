@@ -24,7 +24,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_GPU_LOCK_FILE = Path(r"C:\Users\lemon\Documents\GitHub\.gpu_lock")
+import config as _cfg
+
+_GPU_LOCK_FILE = _cfg.BASE_DIR.parent / ".gpu_lock"
 
 
 @contextmanager

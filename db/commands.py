@@ -155,3 +155,16 @@ def get_all_policies() -> Dict[str, Any]:
 def is_zone_frozen(zone_name: str) -> bool:
     """Проверяет, заморозил ли оператор данную зону."""
     return bool(get_policy(f"freeze_zone_{zone_name}"))
+
+
+def cleanup_expired_policies() -> int:
+    """Удаляет истекшие политики из БД. Возвращает количество удалённых."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM operator_policies WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (datetime.now().isoformat(timespec="seconds"),)
+        )
+        deleted = cursor.rowcount
+    if deleted:
+        logger.info("[Commands] Удалено истекших политик: %d", deleted)
+    return deleted

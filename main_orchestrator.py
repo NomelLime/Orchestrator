@@ -39,7 +39,7 @@ from modules         import config_enforcer, code_evolver, evaluator, supply_tra
 from commander       import notifier
 from commander       import telegram_bot
 from db.experiences  import mark_plan_applied, mark_plan_failed
-from db.commands     import get_policy
+from db.commands     import get_policy, cleanup_expired_policies
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Логирование
@@ -75,6 +75,9 @@ def run_cycle(cycle_num: int = 0) -> None:
         evaluated = evaluator.evaluate_pending_changes()
         if evaluated:
             logger.info("[0/7] Ретроспективная оценка: %d изменений оценено", evaluated)
+
+        # ── Шаг 0.5: Очистка истекших политик ──────────────────────────────
+        cleanup_expired_policies()
 
         # ── Шаг 1: Деградация зон ────────────────────────────────────────────
         logger.info("[1/7] Деградация зон...")

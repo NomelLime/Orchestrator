@@ -209,3 +209,68 @@ CREATE TABLE IF NOT EXISTS pending_patches (
 
 CREATE INDEX IF NOT EXISTS idx_pending_patches_status
     ON pending_patches(status, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 10: Финансовые записи (FinancialObserver)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- category: 'expense' | 'revenue'
+-- source:   'proxies' | 'accounts' | 'apis' | 'monetization' | 'affiliate' | 'manual'
+
+CREATE TABLE IF NOT EXISTS financial_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    category        TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    amount_rub      REAL NOT NULL DEFAULT 0,
+    description     TEXT NOT NULL DEFAULT '',
+    period_start    TEXT,
+    period_end      TEXT,
+    external_id     TEXT,
+    auto_collected  INTEGER DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_financial_records_date
+    ON financial_records(recorded_at DESC, category);
+
+CREATE INDEX IF NOT EXISTS idx_financial_records_source
+    ON financial_records(source, recorded_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 11: Воронка кросс-проектной аналитики (Этап 12)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    linked_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    sp_stem         TEXT NOT NULL,          -- ключ из SP analytics.json (название видео)
+    platform        TEXT,                   -- youtube | tiktok | instagram
+    video_url       TEXT,                   -- URL загруженного видео
+    prelend_sub_id  TEXT,                   -- sub_id переданный PreLend (sp_{stem})
+    views           INTEGER DEFAULT 0,
+    clicks          INTEGER DEFAULT 0,
+    conversions     INTEGER DEFAULT 0,
+    revenue_rub     REAL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_funnel_events_stem
+    ON funnel_events(sp_stem, linked_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_funnel_events_sub_id
+    ON funnel_events(prelend_sub_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 12: Снапшоты конфигов агентов (Self-healing, Этап 13)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS agent_config_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    agent_name      TEXT NOT NULL,          -- 'SCOUT' | 'EDITOR' | ...
+    config_file     TEXT NOT NULL,          -- абсолютный путь к файлу
+    config_json     TEXT NOT NULL,          -- содержимое файла (JSON)
+    applied_plan_id INTEGER REFERENCES evolution_plans(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_config_snapshots_agent
+    ON agent_config_snapshots(agent_name, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_config_snapshots_file
+    ON agent_config_snapshots(config_file, created_at DESC);

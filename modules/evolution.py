@@ -22,6 +22,7 @@ from db.experiences import (
 )
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
+from modules.financial_observer import get_financial_context
 from integrations.ollama_client import call_llm
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ def _build_prompt(metrics_data: Dict) -> str:
     recent   = get_rich_experience_context(last_n=10)
     failed   = get_failed_patterns()
 
+    finances  = get_financial_context(days=30)
     active_zones = [name for name, z in zones.items() if z.get("enabled")]
 
     # ── Секция метрик ─────────────────────────────────────────────────────────

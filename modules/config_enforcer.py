@@ -29,6 +29,7 @@ import config
 from db.experiences import save_applied_change
 from db.zones       import get_all_zones
 from modules.zones  import can_apply, record_success, record_failure
+from modules.agent_healer import snapshot_config
 from integrations   import shorts_project as sp_integration
 from integrations   import prelend as pl_integration
 from integrations   import git_tools
@@ -119,13 +120,24 @@ def _apply_sp_schedule(
     Логика аналогична Strategist._apply_schedule_recommendations(),
     но более консервативна: только конкретные аккаунты/платформы из плана.
     """
-    platform  = change.get("platform")
-    new_times = change.get("new_value") or change.get("new_schedule", [])
-    accounts  = change.get("accounts", ["all"])  # ["all"] или конкретные имена
+    platform   = change.get("platform")
+    new_times  = change.get("new_value") or change.get("new_schedule", [])
+    accounts   = change.get("accounts", ["all"])  # ["all"] или конкретные имена
+    target_geo = change.get("target_geo", "")     # ISO-2 — для конвертации в UTC
 
     if not platform or not new_times:
         logger.warning("[ConfigEnforcer] Нет platform или new_value в плане scheduling")
         return False
+
+    # Конвертируем prime-time местного ГЕО → UTC
+    if target_geo:
+        from modules.timezone_mapper import convert_schedule
+        utc_times = convert_schedule(new_times, target_geo)
+        logger.info(
+            "[ConfigEnforcer] Конвертация расписания: %s (local %s) → %s (UTC)",
+            new_times, target_geo, utc_times,
+        )
+        new_times = utc_times
 
     try:
         all_accounts = sp_integration.get_all_accounts()
@@ -156,6 +168,9 @@ def _apply_sp_schedule(
         # Нет изменений — пропускаем
         if old_schedule == new_times:
             continue
+
+        # Снапшот конфига для self-healing
+        snapshot_config("SCOUT", str(cfg_path), plan_id)
 
         # git-бэкап перед изменением
         git_tools.backup_file(cfg_path, repo_dir=config.SHORTS_PROJECT_DIR)

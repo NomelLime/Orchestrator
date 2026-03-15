@@ -1,0 +1,8 @@
+{
+  "review": {
+    "trigger": {
+      "events": ["pull_request"],
+      "branches": ["main"]
+    }
+  }
+}

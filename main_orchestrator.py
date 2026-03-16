@@ -156,6 +156,11 @@ def run_cycle(cycle_num: int = 0) -> None:
 
         # Пауза перед применением (если задана)
         if config.PLAN_APPLY_DELAY_SEC > 0:
+            delay_min = config.PLAN_APPLY_DELAY_SEC // 60
+            notifier.send_message(
+                f"⏳ <b>Применение плана #{plan_id} через {delay_min} мин.</b>\n"
+                f"Отправьте /freeze чтобы отменить."
+            )
             logger.info("  Ожидание %d сек перед применением...", config.PLAN_APPLY_DELAY_SEC)
             time.sleep(config.PLAN_APPLY_DELAY_SEC)
 

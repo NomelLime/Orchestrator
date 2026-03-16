@@ -50,8 +50,9 @@ CYCLE_INTERVAL_HOURS = int(os.getenv("ORC_CYCLE_HOURS", "1"))
 CYCLE_LOCK_FILE = BASE_DIR / "data" / ".cycle.lock"
 
 # Задержка перед применением плана после генерации (сек), позволяет
-# прочитать план в Telegram до того, как он начнёт применяться
-PLAN_APPLY_DELAY_SEC = 0   # TODO: увеличить если нужна ручная проверка
+# прочитать план в Telegram до того, как он начнёт применяться.
+# Установи ORC_PLAN_APPLY_DELAY=0 для немедленного применения (тесты, DRY_RUN).
+PLAN_APPLY_DELAY_SEC = int(os.getenv("ORC_PLAN_APPLY_DELAY", "300"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Пороги зон доверия (confidence_score, 0–100)

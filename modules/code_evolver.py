@@ -34,6 +34,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -348,6 +349,22 @@ def check_and_revert_on_crash() -> bool:
         logger.warning("[CodeEvolver] Краш-луп есть, но Orchestrator-коммитов не найдено — откат невозможен")
         _notify_crash_no_commit(agents_str)
         return False
+
+    # Проверяем что коммит сделан в пределах окна краш-лупа —
+    # откатывать старый коммит (до начала лупа) нет смысла
+    commit_ts  = git_tools.get_commit_timestamp(config.SHORTS_PROJECT_DIR, commit_hash)
+    window_start = time.time() - config.CRASH_LOOP_WINDOW_MIN * 60
+    if commit_ts and commit_ts < window_start:
+        logger.warning(
+            "[CodeEvolver] Коммит %s слишком старый (ts=%d, window_start=%d) — "
+            "откат не нужен, краш-луп не связан с последним патчем",
+            commit_hash, commit_ts, int(window_start),
+        )
+        return False
+    logger.info(
+        "[CodeEvolver] Коммит %s попадает в окно краш-лупа (ts=%d >= window_start=%d) — откат обоснован",
+        commit_hash, commit_ts, int(window_start),
+    )
 
     reverted = git_tools.revert_commit(config.SHORTS_PROJECT_DIR, commit_hash)
     if not reverted:

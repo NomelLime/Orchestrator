@@ -9,6 +9,7 @@ Orchestrator должен продолжать работу даже если gi
     backup_file(file_path, repo_dir)       → создаёт git stash / commit backup
     commit_change(repo_dir, file_path, message) → git add + commit
     get_last_commit_hash(repo_dir)         → str хэш или ""
+    get_commit_timestamp(repo_dir, commit_hash) → unix timestamp коммита (int)
 """
 
 from __future__ import annotations
@@ -127,6 +128,27 @@ def find_last_orc_commit(repo_dir: Path) -> str:
     # Формат: "abc1234 [Orchestrator/CodeEvolver] описание"
     parts = result.stdout.strip().split(" ", 1)
     return parts[0] if parts else ""
+
+
+def get_commit_timestamp(repo_dir: Path, commit_hash: str) -> int:
+    """
+    Возвращает unix timestamp коммита (int).
+    Если коммит не найден или git недоступен — возвращает 0.
+    """
+    if not commit_hash:
+        return 0
+    result = _run_git(
+        ["log", "--format=%ct", "-1", commit_hash],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        logger.warning("[Git] Не удалось получить timestamp коммита %s", commit_hash)
+        return 0
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        logger.warning("[Git] Некорректный timestamp для коммита %s: %r", commit_hash, result.stdout.strip())
+        return 0
 
 
 def revert_commit(repo_dir: Path, commit_hash: str) -> bool:

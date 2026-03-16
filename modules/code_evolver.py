@@ -106,6 +106,10 @@ def _queue_single_patch(patch_spec: Dict, plan_id: int, repo: str) -> bool:
         logger.warning("[CodeEvolver] Пустой file или goal в патче")
         return False
 
+    # Санитизация перед вставкой в промпт — защита от prompt-injection
+    goal     = _sanitize_for_prompt(goal,     max_len=300)
+    file_rel = _sanitize_for_prompt(file_rel, max_len=150)
+
     # Защита от path traversal — LLM не должна выходить за пределы SP
     file_path = (config.SHORTS_PROJECT_DIR / file_rel).resolve()
     try:
@@ -382,6 +386,24 @@ def check_and_revert_on_crash() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Вспомогательные
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _sanitize_for_prompt(value: str, max_len: int) -> str:
+    """
+    Очищает строку перед вставкой в LLM-промпт:
+      - удаляет управляющие символы (\\x00–\\x1f, \\x7f)
+      - обрезает до max_len символов
+    Предотвращает prompt-injection через поля goal и file_name.
+    """
+    import re as _re
+    sanitized = _re.sub(r"[\x00-\x1f\x7f]", "", value)
+    if len(sanitized) > max_len:
+        logger.warning(
+            "[CodeEvolver] _sanitize_for_prompt: значение обрезано с %d до %d символов: %r...",
+            len(sanitized), max_len, sanitized[:40],
+        )
+        sanitized = sanitized[:max_len]
+    return sanitized
+
 
 def _build_diff_preview(original: str, patched: str, filename: str, max_chars: int = 2500) -> str:
     """Строит unified diff для отображения в Telegram."""

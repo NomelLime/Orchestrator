@@ -57,8 +57,51 @@ def patch_config(tmp_path, monkeypatch):
     (tmp_path / "PreLend" / "config").mkdir(parents=True)
 
 
-@pytest.fixture
-def init_database():
+@pytest.fixture(autouse=True)
+def mock_prelend_client(monkeypatch):
+    """
+    Мокаем PreLendClient во всех тестах — тесты не требуют запущенного VPS.
+    Возвращает реалистичные данные для проверки логики модулей.
+    """
+    from unittest.mock import MagicMock
+    import integrations.prelend_client as pl_mod
+
+    mock = MagicMock()
+    mock.is_available.return_value = True
+    mock.get_metrics.return_value = {
+        "period_hours":     24,
+        "total_clicks":     150,
+        "conversions":      8,
+        "cr":               0.053,
+        "bot_pct":          12.0,
+        "top_geo":          "BR",
+        "shave_suspects":   [],
+        "analyst_verdicts": {},
+        "_unreachable":     False,
+    }
+    mock.get_financial_metrics.return_value = {
+        "period_hours": 840,
+        "conversions":  [],
+    }
+    mock.get_funnel_data.return_value = {
+        "period_hours":     168,
+        "clicks":           [],
+        "conversion_notes": [],
+    }
+    mock.get_settings.return_value    = {"alerts": {"bot_pct_per_hour": 40}}
+    mock.get_advertisers.return_value = []
+    mock.get_geo_data.return_value    = {}
+    mock.get_splits.return_value      = []
+    mock.get_agents.return_value      = []
+    mock.write_settings.return_value  = True
+    mock.write_advertisers.return_value = True
+    mock.write_geo_data.return_value  = True
+    mock.write_splits.return_value    = True
+    mock.stop_agent.return_value      = True
+    mock.start_agent.return_value     = True
+
+    monkeypatch.setattr(pl_mod, "_client", mock)
+    return mock
     """Инициализирует SQLite БД Orchestrator (создаёт все таблицы)."""
     from db.connection import init_db
     init_db()

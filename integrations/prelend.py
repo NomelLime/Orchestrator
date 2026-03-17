@@ -1,37 +1,26 @@
 """
-integrations/prelend.py — Доступ к PreLend.
+integrations/prelend.py — Обратная совместимость.
 
-Читает настройки и данные PreLend без импорта PHP или Python-кода SP.
+Делегирует все вызовы в prelend_client.py (HTTP → PreLend Internal API).
+Прямой доступ к файлам PreLend через файловую систему убран:
+PreLend теперь на VPS, доступен только через Internal API.
 
-Экспортирует:
-    get_settings()          → dict из settings.json
-    get_advertisers()       → список рекламодателей
+Экспортирует (те же имена, что были раньше):
+    get_settings()    → dict
+    get_advertisers() → list
 """
-
 from __future__ import annotations
 
-import json
-import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-import config
-
-logger = logging.getLogger(__name__)
+from .prelend_client import get_client
 
 
 def get_settings() -> Dict:
-    """Читает config/settings.json PreLend."""
-    try:
-        return json.loads(config.PL_SETTINGS.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("[PreLend Integration] Не удалось прочитать settings.json: %s", exc)
-        return {}
+    """Читает config/settings.json PreLend через Internal API."""
+    return get_client().get_settings()
 
 
 def get_advertisers() -> List[Dict]:
-    """Читает config/advertisers.json PreLend."""
-    try:
-        return json.loads(config.PL_ADVERTISERS.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning("[PreLend Integration] Не удалось прочитать advertisers.json: %s", exc)
-        return []
+    """Читает config/advertisers.json PreLend через Internal API."""
+    return get_client().get_advertisers()

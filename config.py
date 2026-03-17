@@ -22,6 +22,14 @@ DB_PATH = BASE_DIR / "data" / "orchestrator.db"
 SHORTS_PROJECT_DIR = BASE_DIR.parent / "ShortsProject"
 PRELEND_DIR        = BASE_DIR.parent / "PreLend"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PreLend Internal API (доступ через SSH tunnel или WireGuard)
+# ─────────────────────────────────────────────────────────────────────────────
+# API слушает на VPS на 127.0.0.1:9090. Доступ с локальной машины —
+# через SSH tunnel: ssh -N -L 9090:127.0.0.1:9090 user@vps-ip
+PL_INTERNAL_API_URL = os.getenv("PL_INTERNAL_API_URL", "http://localhost:9090")
+PL_INTERNAL_API_KEY = os.getenv("PL_INTERNAL_API_KEY", "")
+
 # Конкретные файлы в ShortsProject, которые Orchestrator читает или пишет
 SP_ANALYTICS_FILE  = SHORTS_PROJECT_DIR / "data" / "analytics.json"
 SP_AGENT_MEMORY    = SHORTS_PROJECT_DIR / "data" / "agent_memory.json"

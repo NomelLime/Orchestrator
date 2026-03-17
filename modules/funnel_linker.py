@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,29 +38,32 @@ logger = logging.getLogger(__name__)
 
 def link_funnel() -> int:
     """
-    Синхронизирует SP analytics.json с PreLend clicks.db → funnel_events.
+    Синхронизирует SP analytics.json с PreLend clicks (через Internal API) → funnel_events.
     Возвращает количество обработанных записей.
     """
-    sp_data  = _load_sp_analytics()
+    sp_data = _load_sp_analytics()
     if not sp_data:
         logger.debug("[FunnelLinker] SP analytics.json пуст или не найден")
         return 0
 
-    pl_conn = _open_prelend_db()
-    if pl_conn is None:
-        logger.warning("[FunnelLinker] PreLend clicks.db недоступен")
+    from integrations.prelend_client import get_client
+    client = get_client()
+
+    if not client.is_available():
+        logger.warning("[FunnelLinker] PreLend API недоступен — воронка не обновлена")
         return 0
 
+    funnel_data = client.get_funnel_data(period_hours=168)
+    pl_clicks   = funnel_data.get("clicks", [])
+    pl_conv_notes = funnel_data.get("conversion_notes", [])
+
     updated = 0
-    try:
-        with get_db() as orc_conn:
-            for stem, entry in sp_data.items():
-                rows = _build_funnel_rows(stem, entry, pl_conn)
-                for row in rows:
-                    _upsert_funnel_event(orc_conn, row)
-                    updated += 1
-    finally:
-        pl_conn.close()
+    with get_db() as orc_conn:
+        for stem, entry in sp_data.items():
+            rows = _build_funnel_rows_from_api(stem, entry, pl_clicks, pl_conv_notes)
+            for row in rows:
+                _upsert_funnel_event(orc_conn, row)
+                updated += 1
 
     logger.info("[FunnelLinker] Обновлено записей в funnel_events: %d", updated)
     return updated
@@ -101,60 +103,38 @@ def _load_sp_analytics() -> Optional[Dict]:
         return None
 
 
-def _open_prelend_db() -> Optional[sqlite3.Connection]:
-    """Открывает PreLend clicks.db только на чтение."""
-    db_path = Path(config.PL_CLICKS_DB)
-    if not db_path.exists():
-        return None
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        return conn
-    except sqlite3.Error as exc:
-        logger.warning("[FunnelLinker] Не удалось открыть PreLend DB: %s", exc)
-        return None
-
-
-def _build_funnel_rows(
+def _build_funnel_rows_from_api(
     stem: str,
     entry: Dict,
-    pl_conn: sqlite3.Connection,
+    pl_clicks: List[Dict],
+    pl_conv_notes: List[Dict],
 ) -> List[Dict]:
     """
-    Для одного видео строит список строк воронки (по платформам).
+    Строит строки воронки для одного видео на основе данных из Internal API.
+
+    pl_clicks — строки из GET /metrics/funnel: {utm_content, geo, status, cnt}
+    pl_conv_notes — строки conversions.notes для расчёта revenue
     """
-    rows: List[Dict] = []
     sub_id = f"sp_{stem}"
 
-    # Клики по sub_id в PreLend (utm_content = sub_id)
-    try:
-        click_row = pl_conn.execute(
-            "SELECT COUNT(*) as cnt FROM clicks WHERE utm_content = ? AND is_test = 0",
-            (sub_id,),
-        ).fetchone()
-        total_clicks = click_row["cnt"] if click_row else 0
-    except sqlite3.Error:
-        total_clicks = 0
+    # Агрегируем клики по нашему sub_id
+    total_clicks = sum(
+        r["cnt"] for r in pl_clicks
+        if r.get("utm_content") == sub_id
+    )
 
-    # Конверсии (ищем в notes поле sub_id)
-    try:
-        conv_row = pl_conn.execute(
-            "SELECT COUNT(*) as cnt, SUM(CASE WHEN notes LIKE ? THEN 0 ELSE 0 END) as payout"
-            " FROM conversions WHERE notes LIKE ?",
-            (f"%{sub_id}%", f"%{sub_id}%"),
-        ).fetchone()
-        total_convs = conv_row["cnt"] if conv_row else 0
-    except sqlite3.Error:
-        total_convs = 0
+    # Конверсии — клики со статусом converted
+    total_convs = sum(
+        r["cnt"] for r in pl_clicks
+        if r.get("utm_content") == sub_id and r.get("status") == "converted"
+    )
 
-    # Выручка: разбираем payout из notes для конверсий с этим sub_id
-    revenue = _calc_revenue_for_sub_id(pl_conn, sub_id)
+    # Выручка через notes
+    revenue = _calc_revenue_from_notes(sub_id, pl_conv_notes)
 
-    # Разбираем по платформам
     uploads: Dict = entry.get("uploads", {})
     if not uploads:
-        # Нет загрузок — создаём одну строку без платформы
-        rows.append({
+        return [{
             "sp_stem":        stem,
             "platform":       None,
             "video_url":      None,
@@ -163,51 +143,41 @@ def _build_funnel_rows(
             "clicks":         total_clicks,
             "conversions":    total_convs,
             "revenue_rub":    revenue,
-        })
-        return rows
+        }]
 
+    rows = []
     for platform, upload in uploads.items():
-        views = upload.get("views", 0) or 0
-        url   = upload.get("url", "")
-
         rows.append({
             "sp_stem":        stem,
             "platform":       platform,
-            "video_url":      url,
+            "video_url":      upload.get("url", ""),
             "prelend_sub_id": sub_id,
-            "views":          int(views),
-            "clicks":         total_clicks,  # общие клики на sub_id
+            "views":          int(upload.get("views") or 0),
+            "clicks":         total_clicks,
             "conversions":    total_convs,
             "revenue_rub":    revenue,
         })
-
     return rows
 
 
-def _calc_revenue_for_sub_id(pl_conn: sqlite3.Connection, sub_id: str) -> float:
-    """Считает суммарный payout из PreLend conversions.notes для данного sub_id."""
+def _calc_revenue_from_notes(sub_id: str, conv_notes: List[Dict]) -> float:
+    """Считает суммарный payout из списка notes-строк для данного sub_id."""
     total = 0.0
-    try:
-        rows = pl_conn.execute(
-            "SELECT notes FROM conversions WHERE notes LIKE ?",
-            (f"%{sub_id}%",),
-        ).fetchall()
-        for row in rows:
-            notes = row["notes"] or ""
-            # Парсим 'payout=5.00'
-            for part in notes.split(";"):
-                part = part.strip()
-                if part.startswith("payout="):
-                    try:
-                        total += float(part.split("=", 1)[1])
-                    except (ValueError, IndexError):
-                        pass
-    except sqlite3.Error:
-        pass
+    for row in conv_notes:
+        notes = row.get("notes", "") or ""
+        if sub_id not in notes:
+            continue
+        for part in notes.split(";"):
+            part = part.strip()
+            if part.startswith("payout="):
+                try:
+                    total += float(part.split("=", 1)[1]) * int(row.get("count", 1))
+                except (ValueError, IndexError):
+                    pass
     return total
 
 
-def _upsert_funnel_event(conn: sqlite3.Connection, row: Dict) -> None:
+def _upsert_funnel_event(conn, row: Dict) -> None:
     """Вставляет или обновляет запись в funnel_events."""
     conn.execute(
         """

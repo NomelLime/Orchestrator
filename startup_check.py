@@ -274,8 +274,37 @@ def check_env() -> int:
 # 5. Пути к проектам
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_paths() -> int:
-    _head("Пути к проектам")
+def _check_prelend_api() -> int:
+    """Проверяет доступность PreLend Internal API через HTTP."""
+    _head("PreLend Internal API")
+
+    api_url = config.PL_INTERNAL_API_URL
+    api_key = config.PL_INTERNAL_API_KEY
+
+    if not api_key:
+        _warn(
+            f"PL_INTERNAL_API_KEY не задан — API без аутентификации (dev-режим). "
+            f"Задайте ключ в .env для продакшна."
+        )
+
+    try:
+        from integrations.prelend_client import get_client
+        client = get_client()
+        if client.is_available():
+            _ok(f"PreLend Internal API доступен: {api_url}")
+        else:
+            _warn(
+                f"PreLend Internal API недоступен ({api_url}). "
+                f"Zone 3 (PL конфиги), финансовый observer, воронка SP→PL не будут работать. "
+                f"Запустите SSH tunnel: ssh -N -L 9090:127.0.0.1:9090 user@vps-ip"
+            )
+    except Exception as exc:
+        _warn(f"Не удалось проверить PreLend API: {exc}")
+
+    return 0  # недоступность API — не критично (Orchestrator продолжит работу)
+
+
+def check_paths() -> int:    _head("Пути к проектам")
     fails = 0
 
     sp_dir = config.SHORTS_PROJECT_DIR
@@ -340,6 +369,7 @@ def run_checks(abort_on_fail: bool = True) -> bool:
     total_fails += check_external_tools()
     total_fails += check_ollama()
     total_fails += check_env()
+    total_fails += _check_prelend_api()
 
     print(f"\n{'═' * 60}")
     if total_fails == 0:

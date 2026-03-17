@@ -31,7 +31,6 @@ from db.zones       import get_all_zones
 from modules.zones  import can_apply, record_success, record_failure
 from modules.agent_healer import snapshot_config
 from integrations   import shorts_project as sp_integration
-from integrations   import prelend as pl_integration
 from integrations   import git_tools
 
 logger = logging.getLogger(__name__)
@@ -241,6 +240,7 @@ _PL_ALLOWED_THRESHOLDS = frozenset({
 def _apply_pl_thresholds(change: Dict, plan_id: int, zone: str) -> bool:
     """
     Обновляет числовой порог в PreLend/config/settings.json → alerts.
+    Запись выполняется через Internal API (VPS), не через файловую систему.
     """
     param       = change.get("param", "")
     new_value   = change.get("new_value")
@@ -253,27 +253,30 @@ def _apply_pl_thresholds(change: Dict, plan_id: int, zone: str) -> bool:
         logger.warning("[ConfigEnforcer] PreLend threshold: нет new_value для '%s'", param)
         return False
 
-    settings_path = config.PL_SETTINGS
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.error("[ConfigEnforcer] Не удалось прочитать PL settings.json: %s", exc)
+    from integrations.prelend_client import get_client
+    client = get_client()
+
+    current = client.get_settings()
+    if not current and not isinstance(current, dict):
+        logger.error("[ConfigEnforcer] Не удалось прочитать PL settings через API")
         return False
 
-    old_value = settings.get("alerts", {}).get(param)
+    old_value = current.get("alerts", {}).get(param)
     if old_value == new_value:
         logger.debug("[ConfigEnforcer] PL threshold %s не изменился (%s)", param, new_value)
         return True
 
-    git_tools.backup_file(settings_path, repo_dir=config.PRELEND_DIR)
-    settings.setdefault("alerts", {})[param] = new_value
-    _atomic_write_json(settings_path, settings)
+    current.setdefault("alerts", {})[param] = new_value
 
-    git_tools.commit_change(
-        repo_dir  = config.PRELEND_DIR,
-        file_path = settings_path,
-        message   = f"[Orchestrator] PL threshold {param}: {old_value} → {new_value}",
+    ok = client.write_settings(
+        current,
+        source=f"orchestrator/plan_{plan_id}",
     )
+    if not ok:
+        logger.error("[ConfigEnforcer] Не удалось записать PL settings через API")
+        return False
+
+    # git commit выполняется на стороне VPS (внутри Internal API)
     save_applied_change(
         plan_id     = plan_id,
         change_type = "config_change",
@@ -285,13 +288,14 @@ def _apply_pl_thresholds(change: Dict, plan_id: int, zone: str) -> bool:
         new_value   = {"alerts": {param: new_value}},
         test_status = "skipped",
     )
-    logger.info("[ConfigEnforcer] PL threshold %s: %s → %s", param, old_value, new_value)
+    logger.info("[ConfigEnforcer] PL threshold %s: %s → %s (via API)", param, old_value, new_value)
     return True
 
 
 def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
     """
     Изменяет поле rate рекламодателя в PreLend/config/advertisers.json.
+    Запись выполняется через Internal API (VPS).
     """
     advertiser_id = change.get("advertiser_id") or change.get("param", "")
     new_rate      = change.get("new_value")
@@ -301,14 +305,15 @@ def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
         logger.warning("[ConfigEnforcer] PreLend advertiser_rate: нужны advertiser_id и new_value")
         return False
 
-    adv_path = config.PL_ADVERTISERS
-    try:
-        advertisers = json.loads(adv_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.error("[ConfigEnforcer] Не удалось прочитать PL advertisers.json: %s", exc)
+    from integrations.prelend_client import get_client
+    client = get_client()
+
+    advertisers = client.get_advertisers()
+    if not isinstance(advertisers, list):
+        logger.error("[ConfigEnforcer] Не удалось прочитать PL advertisers через API")
         return False
 
-    target   = next((a for a in advertisers if a.get("id") == advertiser_id), None)
+    target = next((a for a in advertisers if a.get("id") == advertiser_id), None)
     if target is None:
         logger.warning("[ConfigEnforcer] PreLend: рекламодатель '%s' не найден", advertiser_id)
         return False
@@ -318,15 +323,15 @@ def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
         logger.debug("[ConfigEnforcer] PL rate %s не изменился (%s)", advertiser_id, new_rate)
         return True
 
-    git_tools.backup_file(adv_path, repo_dir=config.PRELEND_DIR)
     target["rate"] = new_rate
-    _atomic_write_json(adv_path, advertisers)
-
-    git_tools.commit_change(
-        repo_dir  = config.PRELEND_DIR,
-        file_path = adv_path,
-        message   = f"[Orchestrator] PL rate {advertiser_id}: {old_rate} → {new_rate}",
+    ok = client.write_advertisers(
+        advertisers,
+        source=f"orchestrator/plan_{plan_id}",
     )
+    if not ok:
+        logger.error("[ConfigEnforcer] Не удалось записать PL advertisers через API")
+        return False
+
     save_applied_change(
         plan_id     = plan_id,
         change_type = "config_change",
@@ -338,7 +343,7 @@ def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
         new_value   = {"id": advertiser_id, "rate": new_rate},
         test_status = "skipped",
     )
-    logger.info("[ConfigEnforcer] PL rate %s: %s → %s", advertiser_id, old_rate, new_rate)
+    logger.info("[ConfigEnforcer] PL rate %s: %s → %s (via API)", advertiser_id, old_rate, new_rate)
     return True
 
 

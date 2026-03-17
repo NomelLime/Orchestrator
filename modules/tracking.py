@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -179,94 +177,56 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
 
 def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
     """
-    Читает clicks.db (SQLite) и agent_memory.json PreLend.
-    Агрегирует метрики за последние period_hours часов.
+    Получает метрики PreLend через Internal API (HTTP).
+    PreLend находится на VPS — прямой доступ к файлам недоступен.
 
     Возвращает dict:
         total_clicks, conversions, cr, bot_pct, top_geo,
         shave_suspects, analyst_verdicts
     """
-    result: Dict[str, Any] = {
-        "period_hours":    period_hours,
-        "total_clicks":    0,
-        "conversions":     0,
-        "cr":              None,
-        "bot_pct":         None,
-        "top_geo":         None,
-        "shave_suspects":  [],
-        "analyst_verdicts":{},
+    _empty: Dict[str, Any] = {
+        "period_hours":     period_hours,
+        "total_clicks":     0,
+        "conversions":      0,
+        "cr":               None,
+        "bot_pct":          None,
+        "top_geo":          None,
+        "shave_suspects":   [],
+        "analyst_verdicts": {},
+        "_unreachable":     True,
     }
 
-    # ── clicks.db ────────────────────────────────────────────────────────────
-    db_path = config.PL_CLICKS_DB
-    if db_path.exists():
-        try:
-            since_ts = int(time.time()) - period_hours * 3600
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+    from integrations.prelend_client import get_client
+    client = get_client()
 
-            # Общая статистика кликов из таблицы clicks
-            # Статусы: 'sent' | 'converted' | 'bot' | 'cloaked'
-            # 'cloaked' = off-geo трафик (перенаправлен на заглушку)
-            row = conn.execute("""
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'bot'     THEN 1 ELSE 0 END) AS bots,
-                    SUM(CASE WHEN status = 'cloaked' THEN 1 ELSE 0 END) AS cloaked
-                FROM clicks
-                WHERE ts >= ? AND is_test = 0
-            """, (since_ts,)).fetchone()
+    if not client.is_available():
+        logger.warning(
+            "[Tracking] PreLend Internal API недоступен (%s). "
+            "PL метрики обнулены. Проверьте SSH tunnel / WireGuard.",
+            client._base,
+        )
+        return _empty
 
-            if row and row["total"] > 0:
-                result["total_clicks"] = row["total"]
-                result["bot_pct"] = (row["bots"] or 0) / row["total"] * 100
+    data = client.get_metrics(period_hours=period_hours)
+    if not data or data.get("error") == "unreachable":
+        logger.warning("[Tracking] PreLend API вернул пустой ответ — PL метрики обнулены")
+        return _empty
 
-            # Конверсии берём из отдельной таблицы conversions (более точный источник).
-            # logApi() обновляет clicks.status='converted' И вставляет в conversions.
-            # logManual() пишет только в conversions (без связки с кликом).
-            # Поэтому conversions-таблица — единственный надёжный источник.
-            conv_row = conn.execute("""
-                SELECT COALESCE(SUM(count), 0) AS total_convs
-                FROM conversions
-                WHERE created_at >= ?
-            """, (since_ts,)).fetchone()
-
-            if conv_row:
-                result["conversions"] = int(conv_row["total_convs"])
-                if result["total_clicks"] > 0:
-                    result["cr"] = result["conversions"] / result["total_clicks"]
-
-            # Топ ГЕО по отправленным (не bot/cloaked) кликам
-            geo_row = conn.execute("""
-                SELECT geo, COUNT(*) AS cnt
-                FROM clicks
-                WHERE ts >= ? AND is_test = 0 AND status NOT IN ('bot', 'cloaked')
-                GROUP BY geo ORDER BY cnt DESC LIMIT 1
-            """, (since_ts,)).fetchone()
-            if geo_row:
-                result["top_geo"] = geo_row["geo"]
-
-            conn.close()
-
-        except Exception as exc:
-            logger.warning("[Tracking] Ошибка чтения clicks.db: %s", exc)
-
-    # ── agent_memory.json ────────────────────────────────────────────────────
-    memory = _safe_read_json(config.PL_AGENT_MEMORY)
-    if memory:
-        kv = memory.get("kv", {})
-        verdicts_data = kv.get("analyst_last_verdicts", {})
-        result["analyst_verdicts"] = verdicts_data.get("verdicts", {})
-
-    # ── shave_report.json ────────────────────────────────────────────────────
-    shave = _safe_read_json(config.PL_SHAVE_REPORT)
-    if shave:
-        report = shave.get("report", {})
-        result["shave_suspects"] = [
-            adv_id
-            for adv_id, info in report.items()
-            if info.get("verdict") == "shave_suspected"
-        ]
+    # API возвращает данные уже в нужном формате
+    result: Dict[str, Any] = {
+        "period_hours":     period_hours,
+        "total_clicks":     data.get("total_clicks", 0),
+        "conversions":      data.get("conversions", 0),
+        "cr":               data.get("cr"),
+        "bot_pct":          data.get("bot_pct"),
+        "top_geo":          data.get("top_geo"),
+        "shave_suspects":   [
+            s["id"] if isinstance(s, dict) else s
+            for s in data.get("shave_suspects", [])
+        ],
+        "analyst_verdicts": data.get("analyst_verdicts", {}),
+        "_unreachable":     False,
+    }
 
     logger.info(
         "[Tracking] PreLend: clicks=%d, CR=%.3f, bots=%.1f%%, geo=%s, shave_suspects=%d",

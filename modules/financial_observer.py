@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 
-_PL_DB      = config.PL_CLICKS_DB      # PreLend clicks.db
 _SP_ANALYTICS = config.SP_ANALYTICS_FILE  # ShortsProject analytics.json
-_ORC_DB     = config.DB_PATH           # orchestrator.db
+_ORC_DB       = config.DB_PATH            # orchestrator.db
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,52 +85,40 @@ def get_financial_context(days: int = 30) -> Dict[str, Any]:
 
 def _collect_prelend_revenue() -> int:
     """
-    Читает из PreLend clicks.db конверсии с payout > 0.
-    Payout парсится из поля notes ('payout=5.00').
+    Получает конверсии с payout из PreLend через Internal API.
     Дедупликация по external_id = 'pl_conv_{conv_id}'.
     """
-    if not Path(_PL_DB).exists():
-        logger.debug("[FinancialObserver] PreLend clicks.db не найден: %s", _PL_DB)
+    from integrations.prelend_client import get_client
+    client = get_client()
+
+    if not client.is_available():
+        logger.debug("[FinancialObserver] PreLend API недоступен — пропуск revenue")
+        return 0
+
+    data = client.get_financial_metrics(period_hours=35 * 24)
+    rows = data.get("conversions", [])
+    if not rows:
         return 0
 
     added = 0
-    try:
-        conn = sqlite3.connect(str(_PL_DB), timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        # Читаем конверсии с payout за последние 35 дней (запас для повторных запусков)
-        since = (date.today() - timedelta(days=35)).isoformat()
-        rows = conn.execute(
-            """
-            SELECT id, date, advertiser_id, notes
-            FROM conversions
-            WHERE date >= ? AND notes LIKE 'payout=%'
-            ORDER BY date ASC
-            """,
-            (since,),
-        ).fetchall()
-        conn.close()
-    except sqlite3.Error as exc:
-        logger.warning("[FinancialObserver] Ошибка чтения PreLend DB: %s", exc)
-        return 0
-
     for row in rows:
-        ext_id = f"pl_conv_{row['id']}"
-        if record_exists(ext_id):
+        ext_id = f"pl_conv_{row.get('id', '')}"
+        if not row.get("id") or record_exists(ext_id):
             continue
 
-        payout = _parse_payout_from_notes(row["notes"])
+        payout = _parse_payout_from_notes(row.get("notes", ""))
         if payout <= 0:
             continue
 
         add_record(
-            category      = "revenue",
-            source        = "affiliate",
-            amount_rub    = payout,
-            description   = f"PreLend конверсия: adv={row['advertiser_id']} date={row['date']}",
-            period_start  = row["date"],
-            period_end    = row["date"],
-            external_id   = ext_id,
-            auto_collected= True,
+            category       = "revenue",
+            source         = "affiliate",
+            amount_rub     = payout,
+            description    = f"PreLend конверсия: adv={row.get('advertiser_id')} date={row.get('date')}",
+            period_start   = row.get("date", ""),
+            period_end     = row.get("date", ""),
+            external_id    = ext_id,
+            auto_collected = True,
         )
         added += 1
 

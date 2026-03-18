@@ -274,3 +274,22 @@ CREATE INDEX IF NOT EXISTS idx_config_snapshots_agent
 
 CREATE INDEX IF NOT EXISTS idx_config_snapshots_file
     ON agent_config_snapshots(config_file, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 13: Оценки качества планов (FEAT-D)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS plan_quality_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id         INTEGER REFERENCES evolution_plans(id),
+    evaluated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    views_delta_pct REAL,       -- % изменения views за 24ч
+    ctr_delta_pct   REAL,       -- % изменения CTR
+    cr_delta_pct    REAL,       -- % изменения conversion rate
+    ban_delta       INTEGER,    -- изменение ban_count
+    overall_score   REAL,       -- взвешенная оценка (-100..+100)
+    model_used      TEXT,       -- какая LLM модель генерировала план
+    zones_affected  TEXT        -- JSON list зон
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_quality_plan
+    ON plan_quality_scores(plan_id, evaluated_at DESC);

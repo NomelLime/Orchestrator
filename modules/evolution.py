@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional
 
 import config
 from db.experiences import (
-    save_evolution_plan, get_rich_experience_context, get_failed_patterns
+    save_evolution_plan, get_rich_experience_context, get_failed_patterns,
+    get_recent_plan_scores,
 )
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
@@ -123,6 +124,24 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
 Топ ГЕО: {pl.get('top_geo') or 'нет данных'}
 Подозрения на шейв: {pl.get('shave_suspects', [])}
 """
+
+    # ── Качество последних планов ─────────────────────────────────────────────
+    recent_scores = get_recent_plan_scores(limit=5)
+    if recent_scores:
+        quality_block = "\n=== КАЧЕСТВО ПОСЛЕДНИХ ПЛАНОВ (оценка через 24ч) ===\n"
+        for s in recent_scores:
+            quality_block += (
+                f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
+                f", views={s['views_delta_pct']:+.1f}%" if s.get('views_delta_pct') is not None else
+                f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
+            )
+            if s.get("ctr_delta_pct") is not None:
+                quality_block += f", CTR={s['ctr_delta_pct']:+.1f}%"
+            if s.get("cr_delta_pct") is not None:
+                quality_block += f", CR={s['cr_delta_pct']:+.1f}%"
+            quality_block += "\n"
+    else:
+        quality_block = ""
 
     # ── Рекомендации Strategist SP ────────────────────────────────────────────
     # Strategist уже проанализировал данные SP 6 часов назад — используем его
@@ -279,6 +298,7 @@ CTR и абсолютные просмотры — промежуточные и
     return (
         f"Дата: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC\n\n"
         + metrics_block
+        + quality_block
         + strategist_block
         + zones_block
         + experience_block

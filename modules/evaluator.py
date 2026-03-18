@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from db.connection  import get_db
-from db.experiences import update_metric_impact
+from db.experiences import update_metric_impact, save_plan_quality_score
+import config as _config
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ _MIN_AGE_HOURS = 24  # ждём минимум 24ч до оценки
 def evaluate_pending_changes() -> int:
     """
     Оценивает все applied_changes старше 24ч без metric_impact_json.
+    После оценки — агрегирует дельты по plan_id и записывает в plan_quality_scores.
     Возвращает количество оценённых изменений.
     """
     pending = _get_unevaluated_changes()
@@ -40,6 +42,8 @@ def evaluate_pending_changes() -> int:
         return 0
 
     evaluated = 0
+    plan_deltas: Dict[int, list] = {}   # plan_id → list of deltas
+
     for change in pending:
         delta = _compute_delta(change)
         if delta:
@@ -50,12 +54,69 @@ def evaluate_pending_changes() -> int:
                 json.dumps(delta, ensure_ascii=False)[:80],
             )
             evaluated += 1
+            plan_id = change.get("plan_id")
+            if plan_id:
+                plan_deltas.setdefault(plan_id, []).append(delta)
         else:
             logger.debug("[Evaluator] Нет снапшотов для оценки #%d", change["id"])
+
+    # Агрегируем дельты по плану → записываем plan_quality_scores
+    for plan_id, deltas in plan_deltas.items():
+        _save_plan_quality(plan_id, deltas)
 
     if evaluated:
         logger.info("[Evaluator] Оценено: %d изменений", evaluated)
     return evaluated
+
+
+def _save_plan_quality(plan_id: int, deltas: list) -> None:
+    """Вычисляет overall_score и записывает в plan_quality_scores."""
+    views_vals  = [d["views_delta_pct"] for d in deltas if "views_delta_pct" in d]
+    ctr_vals    = [d["ctr_delta_pct"]   for d in deltas if "ctr_delta_pct"   in d]
+    cr_vals     = [d["cr_delta_pct"]    for d in deltas if "cr_delta_pct"    in d]
+    ban_vals    = [d["ban_delta"]        for d in deltas if "ban_delta"        in d]
+
+    avg = lambda lst: sum(lst) / len(lst) if lst else None
+
+    views_delta = avg(views_vals)
+    ctr_delta   = avg(ctr_vals)
+    cr_delta    = avg(cr_vals)
+    ban_delta   = int(sum(ban_vals)) if ban_vals else None
+
+    # Взвешенная оценка: просмотры и CTR — 30% каждый, CR — 30%, баны — штраф
+    score = 0.0
+    if views_delta is not None:
+        score += views_delta * 0.3
+    if ctr_delta is not None:
+        score += ctr_delta * 0.3
+    if cr_delta is not None:
+        score += cr_delta * 0.3
+    if ban_delta is not None:
+        score -= ban_delta * 10   # каждый новый бан = −10 баллов
+
+    # Собираем затронутые зоны из applied_changes
+    zones_affected: list = []
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT zone FROM applied_changes WHERE plan_id = ?",
+                (plan_id,),
+            ).fetchall()
+            zones_affected = [r["zone"] for r in rows if r["zone"]]
+    except Exception:
+        pass
+
+    save_plan_quality_score(
+        plan_id        = plan_id,
+        views_delta_pct= views_delta,
+        ctr_delta_pct  = ctr_delta,
+        cr_delta_pct   = cr_delta,
+        ban_delta      = ban_delta,
+        overall_score  = round(score, 2),
+        model_used     = getattr(_config, "OLLAMA_STRATEGY_MODEL", ""),
+        zones_affected = zones_affected,
+    )
+    logger.info("[Evaluator] plan_quality_scores для плана #%d: score=%.2f", plan_id, score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

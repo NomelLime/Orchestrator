@@ -209,3 +209,55 @@ def get_last_applied_plan_id() -> Optional[int]:
             "ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
     return row["id"] if row else None
+
+
+def save_plan_quality_score(
+    plan_id: int,
+    views_delta_pct: Optional[float],
+    ctr_delta_pct: Optional[float],
+    cr_delta_pct: Optional[float],
+    ban_delta: Optional[int],
+    overall_score: float,
+    model_used: str = "",
+    zones_affected: Optional[list] = None,
+) -> int:
+    """Сохраняет оценку качества плана после 24ч ретроспективы."""
+    with get_db() as conn:
+        cursor = conn.execute("""
+            INSERT INTO plan_quality_scores
+                (plan_id, views_delta_pct, ctr_delta_pct, cr_delta_pct,
+                 ban_delta, overall_score, model_used, zones_affected)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            plan_id,
+            views_delta_pct,
+            ctr_delta_pct,
+            cr_delta_pct,
+            ban_delta,
+            overall_score,
+            model_used,
+            json.dumps(zones_affected or []),
+        ))
+        return cursor.lastrowid
+
+
+def get_recent_plan_scores(limit: int = 5) -> List[Dict]:
+    """Возвращает последние оценки качества планов для LLM-промпта."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT pqs.plan_id, pqs.evaluated_at, pqs.views_delta_pct,
+                   pqs.ctr_delta_pct, pqs.cr_delta_pct, pqs.ban_delta,
+                   pqs.overall_score, pqs.zones_affected
+            FROM plan_quality_scores pqs
+            ORDER BY pqs.evaluated_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["zones_affected"] = json.loads(d["zones_affected"] or "[]")
+        except Exception:
+            d["zones_affected"] = []
+        result.append(d)
+    return result

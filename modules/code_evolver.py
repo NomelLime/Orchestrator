@@ -376,7 +376,7 @@ def check_and_revert_on_crash() -> bool:
         _notify_crash_revert_failed(agents_str, commit_hash)
         return False
 
-    _mark_last_patch_reverted(crash_agents)
+    _mark_last_patch_reverted(crash_agents, commit_hash)
     record_failure("code", f"краш-луп агентов: {agents_str} → откат {commit_hash}")
     _notify_crash_reverted(agents_str, commit_hash)
     logger.info("[CodeEvolver] ✅ Откат %s выполнен (краш-луп: %s)", commit_hash, agents_str)
@@ -463,21 +463,41 @@ def _run_tests() -> Tuple[bool, str]:
         return False, f"pytest error: {exc}"
 
 
-def _mark_last_patch_reverted(crash_agents: list) -> None:
-    """Помечает последний code_patch как rolled_back в applied_changes."""
+def _mark_last_patch_reverted(crash_agents: list, commit_hash: str = "") -> None:
+    """
+    Помечает применённое изменение как rolled_back в applied_changes.
+    При наличии commit_hash — ищет по нему (точнее, чем по change_type).
+    Fallback: последний code_patch без rolled_back.
+    """
+    reason = f"краш-луп: {', '.join(crash_agents)}"
     try:
         with get_db() as conn:
-            row = conn.execute("""
-                SELECT id FROM applied_changes
-                WHERE change_type = 'code_patch' AND rolled_back = 0
-                ORDER BY applied_at DESC LIMIT 1
-            """).fetchone()
+            row = None
+            if commit_hash:
+                # Ищем по коротким 8 символам хэша в description
+                row = conn.execute("""
+                    SELECT id FROM applied_changes
+                    WHERE rolled_back = 0 AND description LIKE ?
+                    ORDER BY applied_at DESC LIMIT 1
+                """, (f"%{commit_hash[:8]}%",)).fetchone()
+
+            if not row:
+                # Fallback: последний code_patch
+                row = conn.execute("""
+                    SELECT id FROM applied_changes
+                    WHERE change_type = 'code_patch' AND rolled_back = 0
+                    ORDER BY applied_at DESC LIMIT 1
+                """).fetchone()
+
             if row:
                 conn.execute("""
                     UPDATE applied_changes
                     SET rolled_back = 1, rollback_reason = ?
                     WHERE id = ?
-                """, (f"краш-луп: {', '.join(crash_agents)}", row["id"]))
+                """, (reason, row["id"]))
+                logger.info("[CodeEvolver] applied_changes #%d помечен как откатанный", row["id"])
+            else:
+                logger.warning("[CodeEvolver] Нет записей applied_changes для пометки отката")
     except Exception as exc:
         logger.warning("[CodeEvolver] Не удалось пометить откат в БД: %s", exc)
 

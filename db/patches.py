@@ -9,6 +9,7 @@ db/patches.py — CRUD для таблицы pending_patches.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from db.connection import get_db
@@ -83,40 +84,40 @@ def get_pending_patches() -> List[Dict]:
 def mark_patch_approved(patch_id: int) -> bool:
     """Помечает патч как одобренный. Возвращает False если ID не найден или статус не 'pending'."""
     with get_db() as conn:
-        cur = conn.execute("""
-            UPDATE pending_patches
-            SET status = 'approved', approved_at = datetime('now')
-            WHERE id = ? AND status = 'pending'
-        """, (patch_id,))
+        cur = conn.execute(
+            "UPDATE pending_patches SET status = 'approved', approved_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (datetime.now(timezone.utc).isoformat(), patch_id),
+        )
         return cur.rowcount > 0
 
 
 def mark_patch_rejected(patch_id: int) -> bool:
     """Помечает патч как отклонённый. Возвращает False если ID не найден или статус не 'pending'."""
     with get_db() as conn:
-        cur = conn.execute("""
-            UPDATE pending_patches
-            SET status = 'rejected', approved_at = datetime('now')
-            WHERE id = ? AND status = 'pending'
-        """, (patch_id,))
+        cur = conn.execute(
+            "UPDATE pending_patches SET status = 'rejected', approved_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (datetime.now(timezone.utc).isoformat(), patch_id),
+        )
         return cur.rowcount > 0
 
 
 def mark_patch_applied(patch_id: int, apply_result: str = "") -> None:
     """Помечает патч как успешно применённый."""
     with get_db() as conn:
-        conn.execute("""
-            UPDATE pending_patches
-            SET status = 'applied', applied_at = datetime('now'), apply_result = ?
-            WHERE id = ?
-        """, (apply_result[:2000], patch_id))
+        conn.execute(
+            "UPDATE pending_patches SET status = 'applied', applied_at = ?, apply_result = ? "
+            "WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), apply_result[:2000], patch_id),
+        )
 
 
 def mark_patch_failed(patch_id: int, apply_result: str = "") -> None:
     """Помечает патч как проваленный (тесты не прошли)."""
     with get_db() as conn:
-        conn.execute("""
-            UPDATE pending_patches
-            SET status = 'failed', applied_at = datetime('now'), apply_result = ?
-            WHERE id = ?
-        """, (apply_result[:2000], patch_id))
+        conn.execute(
+            "UPDATE pending_patches SET status = 'failed', applied_at = ?, apply_result = ? "
+            "WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), apply_result[:2000], patch_id),
+        )

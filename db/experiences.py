@@ -199,3 +199,13 @@ def get_failed_patterns() -> List[str]:
         f"[{row['zone']}] {row['description']} → {row['rollback_reason'] or 'тесты не прошли'}"
         for row in rows
     ]
+
+
+def get_last_applied_plan_id() -> Optional[int]:
+    """Возвращает id последнего успешно применённого плана или None."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM evolution_plans WHERE status = 'applied' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row["id"] if row else None

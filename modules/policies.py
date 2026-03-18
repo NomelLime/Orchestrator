@@ -183,12 +183,32 @@ def _apply_parsed_command(parsed: Dict, command_id: int) -> None:
             set_policy("pause_evolution", False, command_id=command_id)
 
         elif action == "rollback_last":
-            # TODO: реализовать откат последнего плана через applied_changes
-            logger.info("[Policies] Откат последнего плана — TODO")
+            from db.experiences import get_last_applied_plan_id
+            from db.commands import set_policy as _set_policy
+            last_plan_id = get_last_applied_plan_id()
+            if last_plan_id:
+                # Откат через git revert: переиспользуем механизм code_evolver
+                from integrations import git_tools
+                commit_hash = git_tools.find_last_orc_commit(config.SHORTS_PROJECT_DIR)
+                if commit_hash:
+                    reverted = git_tools.revert_commit(config.SHORTS_PROJECT_DIR, commit_hash)
+                    if reverted:
+                        logger.info(
+                            "[Policies] Откат плана #%d: revert коммита %s",
+                            last_plan_id, commit_hash,
+                        )
+                    else:
+                        logger.error("[Policies] git revert %s не удался", commit_hash)
+                else:
+                    logger.warning("[Policies] Нет Orchestrator-коммитов для отката плана #%d", last_plan_id)
+            else:
+                logger.warning("[Policies] Нет применённых планов для отката")
 
         elif action == "trigger_cycle":
-            # TODO: сигнал для main_orchestrator.py чтобы запустить цикл немедленно
-            set_policy("force_cycle", True, command_id=command_id)
+            from main_orchestrator import trigger_force_cycle
+            trigger_force_cycle()
+            set_policy("force_cycle", True, command_id=command_id,
+                       description="оператор: внеочередной цикл")
 
     elif cmd_type == "config_hint":
         # Мягкие указания сохраняем как политику для LLM-промпта

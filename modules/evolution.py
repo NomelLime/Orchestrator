@@ -24,7 +24,7 @@ from db.experiences import (
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
 from modules.financial_observer import get_financial_context
-from modules.code_evolver import _sanitize_for_prompt as _san
+from modules.code_evolver import sanitize_for_prompt as _san
 from integrations.ollama_client import call_llm
 
 logger = logging.getLogger(__name__)

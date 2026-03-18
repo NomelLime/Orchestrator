@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -387,22 +388,21 @@ def check_and_revert_on_crash() -> bool:
 # Вспомогательные
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sanitize_for_prompt(value: str, max_len: int) -> str:
+def sanitize_for_prompt(value: str, max_len: int = 500) -> str:
     """
     Очищает строку перед вставкой в LLM-промпт:
-      - удаляет управляющие символы (\\x00–\\x1f, \\x7f)
+      - удаляет ASCII и Unicode control/format символы (категории Cc, Cf)
+        включая нулевые байты, управляющие escape-последовательности,
+        Unicode direction overrides (U+202E) и прочие невидимые инжекции
       - обрезает до max_len символов
-    Предотвращает prompt-injection через поля goal и file_name.
+    Предотвращает prompt-injection через поля goal, file_name, agent_memory.
     """
-    import re as _re
-    sanitized = _re.sub(r"[\x00-\x1f\x7f]", "", value)
-    if len(sanitized) > max_len:
-        logger.warning(
-            "[CodeEvolver] _sanitize_for_prompt: значение обрезано с %d до %d символов: %r...",
-            len(sanitized), max_len, sanitized[:40],
-        )
-        sanitized = sanitized[:max_len]
-    return sanitized
+    cleaned = ''.join(c for c in value if unicodedata.category(c) not in ('Cc', 'Cf'))
+    return cleaned[:max_len]
+
+
+# Алиас для обратной совместимости с внутренними вызовами
+_sanitize_for_prompt = sanitize_for_prompt
 
 
 def _build_diff_preview(original: str, patched: str, filename: str, max_chars: int = 2500) -> str:

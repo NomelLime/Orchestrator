@@ -13,7 +13,6 @@ tests/test_tracking.py — Тесты сбора метрик из ShortsProject
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta
 
 
@@ -158,116 +157,106 @@ class TestShortsProjectTracking:
 
 
 class TestPreLendTracking:
-    """collect_prelend_snapshot: чтение clicks.db (реальная схема PreLend)."""
+    """
+    collect_prelend_snapshot: данные получаются через PreLend Internal API (HTTP).
+    Прямой доступ к clicks.db убран — тесты используют mock_prelend_client (conftest.py).
+    """
 
-    def test_empty_db_returns_zeros(self, make_prelend_db):
-        """Пустая БД → метрики 0, без исключений."""
-        make_prelend_db(clicks=[], conversions=[])
+    def test_api_unavailable_returns_zeros(self, mock_prelend_client):
+        """API недоступен → метрики 0, _unreachable=True, без исключений."""
+        mock_prelend_client.is_available.return_value = False
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["total_clicks"] == 0
         assert result["conversions"] == 0
         assert result["cr"] is None
+        assert result["_unreachable"] is True
 
-    def test_no_db_graceful(self):
-        """Если clicks.db не существует → метрики 0, без исключений."""
+    def test_api_unavailable_graceful(self, mock_prelend_client):
+        """API недоступен → возвращается пустой снапшот без исключений."""
+        mock_prelend_client.is_available.return_value = False
+
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["total_clicks"] == 0
+        assert result["bot_pct"] is None
+        assert result["top_geo"] is None
 
-    def test_counts_clicks(self, make_prelend_db):
-        """Считает клики из таблицы clicks."""
-        now_ts = int(time.time())
-        make_prelend_db(clicks=[
-            {"click_id": f"c{i}", "ts": now_ts, "status": "sent"}
-            for i in range(10)
-        ])
+    def test_api_returns_clicks(self, mock_prelend_client):
+        """API возвращает клики → total_clicks корректно отражается в снапшоте."""
+        mock_prelend_client.is_available.return_value = True
+        mock_prelend_client.get_metrics.return_value = {
+            "total_clicks": 10, "conversions": 0, "cr": None,
+            "bot_pct": None, "top_geo": None,
+            "shave_suspects": [], "analyst_verdicts": {},
+        }
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["total_clicks"] == 10
+        assert result["_unreachable"] is False
 
-    def test_counts_conversions_from_conversions_table(self, make_prelend_db):
-        """Конверсии берутся из таблицы conversions, не из clicks.status."""
-        now_ts = int(time.time())
-        make_prelend_db(
-            clicks=[
-                {"click_id": f"c{i}", "ts": now_ts, "status": "sent"}
-                for i in range(20)
-            ],
-            conversions=[
-                {"conv_id": f"v{i}", "date": "2024-01-01",
-                 "advertiser_id": "adv1", "count": 1, "created_at": now_ts}
-                for i in range(5)
-            ]
-        )
+    def test_api_returns_conversions(self, mock_prelend_client):
+        """API возвращает конверсии → conversions и cr корректны."""
+        mock_prelend_client.is_available.return_value = True
+        mock_prelend_client.get_metrics.return_value = {
+            "total_clicks": 20, "conversions": 5, "cr": 0.25,
+            "bot_pct": None, "top_geo": None,
+            "shave_suspects": [], "analyst_verdicts": {},
+        }
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["conversions"] == 5
-        assert abs(result["cr"] - 5/20) < 0.0001
+        assert abs(result["cr"] - 0.25) < 0.0001
 
-    def test_bot_pct_calculation(self, make_prelend_db):
-        """bot_pct = bot_clicks / total_clicks * 100."""
-        now_ts = int(time.time())
-        make_prelend_db(clicks=[
-            {"click_id": "c1", "ts": now_ts, "status": "sent"},
-            {"click_id": "c2", "ts": now_ts, "status": "sent"},
-            {"click_id": "c3", "ts": now_ts, "status": "bot"},
-            {"click_id": "c4", "ts": now_ts, "status": "bot"},
-        ])
+    def test_api_returns_bot_pct(self, mock_prelend_client):
+        """API возвращает bot_pct → корректно пробрасывается в снапшот."""
+        mock_prelend_client.is_available.return_value = True
+        mock_prelend_client.get_metrics.return_value = {
+            "total_clicks": 4, "conversions": 0, "cr": None,
+            "bot_pct": 50.0, "top_geo": None,
+            "shave_suspects": [], "analyst_verdicts": {},
+        }
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["total_clicks"] == 4
         assert abs(result["bot_pct"] - 50.0) < 0.1
 
-    def test_cloaked_not_counted_as_bot(self, make_prelend_db):
-        """'cloaked' (off-geo) — это не боты, отдельная категория."""
-        now_ts = int(time.time())
-        make_prelend_db(clicks=[
-            {"click_id": "c1", "ts": now_ts, "status": "sent"},
-            {"click_id": "c2", "ts": now_ts, "status": "cloaked"},  # off-geo, не бот
-            {"click_id": "c3", "ts": now_ts, "status": "bot"},
-        ])
-
-        from modules.tracking import collect_prelend_snapshot
-        result = collect_prelend_snapshot()
-        # Только 1 из 3 — бот (33.3%), не 2 из 3
-        assert abs(result["bot_pct"] - 100/3) < 0.5
-
-    def test_top_geo_detection(self, make_prelend_db):
-        """Определяет самое популярное ГЕО по не-bot/cloaked кликам."""
-        now_ts = int(time.time())
-        make_prelend_db(clicks=[
-            {"click_id": "c1", "ts": now_ts, "geo": "BR", "status": "sent"},
-            {"click_id": "c2", "ts": now_ts, "geo": "BR", "status": "sent"},
-            {"click_id": "c3", "ts": now_ts, "geo": "US", "status": "sent"},
-        ])
+    def test_api_returns_top_geo(self, mock_prelend_client):
+        """API возвращает top_geo → отражается в снапшоте."""
+        mock_prelend_client.is_available.return_value = True
+        mock_prelend_client.get_metrics.return_value = {
+            "total_clicks": 3, "conversions": 0, "cr": None,
+            "bot_pct": 0.0, "top_geo": "BR",
+            "shave_suspects": [], "analyst_verdicts": {},
+        }
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
         assert result["top_geo"] == "BR"
 
-    def test_excludes_test_clicks(self, make_prelend_db):
-        """Тестовые клики (is_test=1) не считаются."""
-        now_ts = int(time.time())
-        make_prelend_db(clicks=[
-            {"click_id": "c1", "ts": now_ts, "status": "sent", "is_test": 0},
-            {"click_id": "c2", "ts": now_ts, "status": "sent", "is_test": 1},  # тест
-            {"click_id": "c3", "ts": now_ts, "status": "sent", "is_test": 1},  # тест
-        ])
+    def test_shave_suspects_normalized(self, mock_prelend_client):
+        """shave_suspects из API (список dict) нормализуются в список id-строк."""
+        mock_prelend_client.is_available.return_value = True
+        mock_prelend_client.get_metrics.return_value = {
+            "total_clicks": 5, "conversions": 0, "cr": None,
+            "bot_pct": 0.0, "top_geo": "PL",
+            "shave_suspects": [{"id": "adv1", "suspected_shave": True}],
+            "analyst_verdicts": {},
+        }
 
         from modules.tracking import collect_prelend_snapshot
         result = collect_prelend_snapshot()
-        assert result["total_clicks"] == 1
+        assert result["shave_suspects"] == ["adv1"]
 
 
 class TestCollectAllAndSave:
     """collect_all_and_save: интеграционный тест сохранения снапшотов в БД."""
 
-    def test_saves_both_snapshots(self, init_database, make_sp_analytics, make_prelend_db):
+    def test_saves_both_snapshots(self, init_database, make_sp_analytics, mock_prelend_client):
         """Оба снапшота сохраняются в metrics_snapshots."""
         from db.metrics import get_latest_snapshot
 
@@ -277,9 +266,8 @@ class TestCollectAllAndSave:
                 "uploads": {"youtube": {"uploaded_at": now_iso, "views": 100, "likes": 5}}
             }
         })
-        make_prelend_db(clicks=[
-            {"click_id": "c1", "ts": int(time.time()), "status": "sent"}
-        ])
+        # Mock уже настроен в conftest: total_clicks=150
+        mock_prelend_client.is_available.return_value = True
 
         from modules.tracking import collect_all_and_save
         collect_all_and_save()
@@ -290,4 +278,25 @@ class TestCollectAllAndSave:
         assert sp_snap is not None
         assert pl_snap is not None
         assert sp_snap["sp_total_views"] == 100
-        assert pl_snap["pl_total_clicks"] == 1
+        assert pl_snap["pl_total_clicks"] == 150  # значение из mock
+
+    def test_pl_api_unavailable_sp_still_saved(
+        self, init_database, make_sp_analytics, mock_prelend_client
+    ):
+        """Если PL API недоступен — SP снапшот всё равно сохраняется."""
+        from db.metrics import get_latest_snapshot
+
+        now_iso = datetime.now().isoformat()
+        make_sp_analytics({
+            "vid_x": {
+                "uploads": {"youtube": {"uploaded_at": now_iso, "views": 50, "likes": 2}}
+            }
+        })
+        mock_prelend_client.is_available.return_value = False
+
+        from modules.tracking import collect_all_and_save
+        collect_all_and_save()
+
+        sp_snap = get_latest_snapshot("ShortsProject")
+        assert sp_snap is not None
+        assert sp_snap["sp_total_views"] == 50

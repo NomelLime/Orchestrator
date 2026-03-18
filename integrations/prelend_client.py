@@ -53,6 +53,11 @@ class PreLendClient:
         except Exception:
             return False
 
+    @property
+    def base_url(self) -> str:
+        """URL Internal API (для логирования)."""
+        return self._base
+
     # ── Метрики ────────────────────────────────────────────────────────────────
 
     def get_metrics(self, period_hours: int = 24) -> Dict[str, Any]:

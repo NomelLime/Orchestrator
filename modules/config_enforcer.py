@@ -257,8 +257,17 @@ def _apply_pl_thresholds(change: Dict, plan_id: int, zone: str) -> bool:
     client = get_client()
 
     current = client.get_settings()
-    if not current and not isinstance(current, dict):
-        logger.error("[ConfigEnforcer] Не удалось прочитать PL settings через API")
+    if not current or not isinstance(current, dict):
+        logger.error(
+            "[ConfigEnforcer] Не удалось прочитать PL settings через API "
+            "(пустой или невалидный ответ)"
+        )
+        return False
+    if "alerts" not in current:
+        logger.error(
+            "[ConfigEnforcer] PL settings не содержит ключ 'alerts' — "
+            "возможно ошибка API или пустой файл"
+        )
         return False
 
     old_value = current.get("alerts", {}).get(param)
@@ -309,8 +318,11 @@ def _apply_pl_advertiser_rate(change: Dict, plan_id: int, zone: str) -> bool:
     client = get_client()
 
     advertisers = client.get_advertisers()
-    if not isinstance(advertisers, list):
-        logger.error("[ConfigEnforcer] Не удалось прочитать PL advertisers через API")
+    if not isinstance(advertisers, list) or len(advertisers) == 0:
+        logger.error(
+            "[ConfigEnforcer] Не удалось прочитать PL advertisers через API "
+            "(пустой или невалидный ответ) — запись отменена"
+        )
         return False
 
     target = next((a for a in advertisers if a.get("id") == advertiser_id), None)

@@ -203,7 +203,7 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         logger.warning(
             "[Tracking] PreLend Internal API недоступен (%s). "
             "PL метрики обнулены. Проверьте SSH tunnel / WireGuard.",
-            client._base,
+            client.base_url,
         )
         return _empty
 

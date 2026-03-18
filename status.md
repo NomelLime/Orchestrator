@@ -425,7 +425,16 @@ PreLend перенесён на VPS — прямой доступ к его фа
 | `main_orchestrator.py` | Нет уведомления перед sleep | + Telegram «⏳ Применение через N мин. /freeze» |
 | `modules/code_evolver.py` | Нет санитизации `goal` и `file_name` перед LLM | + `_sanitize_for_prompt(value, max_len)` — удаляет управляющие символы, обрезает |
 
-**Единая точка входа:**
+**Фиксы дельта-ревью (сессия 8, часть 2):**
+
+| Файл | Проблема | Исправление |
+|------|----------|-------------|
+| `tests/test_tracking.py` | `TestPreLendTracking` использовал `make_prelend_db` — несовместимо с HTTP-архитектурой | Все тесты переписаны под `mock_prelend_client`. Удалены тесты фильтрации cloaked/is_test — логика на VPS |
+| `tests/test_tracking.py` | `TestCollectAllAndSave` использовал `make_prelend_db` | Заменён на `mock_prelend_client`; добавлен тест деградации SP при недоступном PL API |
+| `modules/config_enforcer.py` | `if not current and not isinstance(...)` пропускал `{}` | Исправлено: `if not current or not isinstance(...)` + проверка наличия ключа `alerts` |
+| `modules/config_enforcer.py` | `_apply_pl_advertiser_rate`: `[]` не блокировал перезапись | Добавлена проверка `len(advertisers) == 0` → return False |
+| `integrations/prelend_client.py` | Нет публичного доступа к `_base` | + `base_url` property |
+| `modules/tracking.py` | Обращение к приватному `client._base` | Заменено на `client.base_url` |
 - Теперь запускается только `python main_orchestrator.py`. SP pipeline стартует автоматически.
 
 **startup_check.py (NEW):**

@@ -496,3 +496,13 @@ PreLend перенесён на VPS — прямой доступ к его фа
 | FEAT-D | `db/schema.sql`, `db/experiences.py`, `modules/evaluator.py`, `modules/evolution.py`, `backend/api/routes/analytics.py` | Таблица `plan_quality_scores`; взвешенный `overall_score`; quality_block в LLM-промпте; `GET /api/analytics/plan-quality` |
 | FEAT-E | `internal_api/main.py`, `integrations/prelend_client.py`, `modules/tracking.py` | `/health` возвращает `db_size_mb`, `last_click_ago_sec`, `traffic_alive`, `pending_clicks_24h`; `get_health()` в клиенте; `traffic_alive` в snapshot |
 | FEAT-F | `pipeline/download.py`, `pipeline/config.py`, `pipeline/agents/publisher.py` | `retry_failed()` с экспоненциальным backoff; `upload_retry_queue.json`; Publisher обрабатывает retry queue в начале каждого цикла |
+
+### Code Review (18.03.2026) — исправления по результатам полного ревью
+
+| # | Severity | Файл(ы) | Исправление |
+|---|----------|---------|-------------|
+| FIX#2 | Critical | `modules/evolution.py` | Санитизация внешних данных перед LLM: `agent_statuses`, `shave_suspects`, `strategist_recs` через `_san()` из `code_evolver` |
+| FIX#8 | Medium | `main_orchestrator.py` | `_cleanup_old_data()`: удаление метрик (>90d), уведомлений (>30d), планов (>180d) — вызывается раз в сутки |
+| FIX#11 | Medium | `modules/evolution.py` | Убран запутанный тернарный оператор в `quality_block` — заменён на читаемый `if`-chain |
+| FIX#12 | Medium | `db/patches.py` | `datetime('now')` SQLite → `datetime.now(timezone.utc).isoformat()` во всех `mark_patch_*()` |
+| FIX#4 | High | `.env.example` | Добавлена инструкция по генерации `PL_INTERNAL_API_KEY` |

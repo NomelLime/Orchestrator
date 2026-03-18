@@ -102,6 +102,10 @@ def mock_prelend_client(monkeypatch):
 
     monkeypatch.setattr(pl_mod, "_client", mock)
     return mock
+
+
+@pytest.fixture
+def init_database():
     """Инициализирует SQLite БД Orchestrator (создаёт все таблицы)."""
     from db.connection import init_db
     init_db()

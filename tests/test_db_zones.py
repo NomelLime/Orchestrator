@@ -165,6 +165,9 @@ class TestZoneDecay:
             )
 
         before = get_zone("scheduling")["confidence_score"]
+        # Сбрасываем guard чтобы decay выполнился в тесте
+        import db.zones as _zones_mod
+        _zones_mod._last_decay_date = None
         apply_zone_decay()
         after = get_zone("scheduling")["confidence_score"]
 

@@ -473,3 +473,26 @@ PreLend перенесён на VPS — прямой доступ к его фа
 **modules/evolution.py:**
 - ROI-фреймирование промпта: формула `views_delta_pct × engagement_rate × survival_rate × account_health`
 - Поле `justification` в JSON-схеме code_patches
+
+### Сессия 10 (18.03.2026) — Багфиксы + фичи
+
+**Багфиксы:**
+
+| # | Файл(ы) | Проблема | Исправление |
+|---|---------|----------|-------------|
+| BUG-1 | `main_orchestrator.py`, `commander/telegram_bot.py` | `time.sleep()` блокировал реакцию на `/freeze` | `_cancel_plan.wait(timeout=...)` + проверка policy после. Команды `/freeze`, `/cancel_plan` → `cancel_pending_plan()` |
+| BUG-2 | `modules/code_evolver.py` | `_mark_last_patch_reverted` находил не тот record (по change_type вместо commit_hash) | Добавлен параметр `commit_hash`; поиск по `description LIKE '%hash8%'` с fallback |
+| BUG-3 | `modules/policies.py`, `db/experiences.py`, `main_orchestrator.py` | `rollback_last` = TODO; `trigger_cycle` писал в БД но не будил цикл | `rollback_last` реализован через `git_tools.revert_commit`. `trigger_cycle` → `trigger_force_cycle()` → `_force_cycle.set()` |
+| BUG-4 | `db/commands.py` | `datetime.now()` vs aware datetime → TypeError в get_policy | `_is_expired()` хелпер нормализует naive/aware; все `datetime.now()` → `datetime.now(timezone.utc)` |
+| BUG-5 | `src/ClickLogger.php`, `public/index.php` | INSERT fail → мёртвый click_id уходил рекламодателю → потеря конверсии | `$lastInsertFailed = true` в catch; в index.php — если флаг установлен, redirect без SubID |
+
+**Фичи:**
+
+| # | Файл(ы) | Суть |
+|---|---------|------|
+| FEAT-A | `main_orchestrator.py`, `telegram_bot.py` | `/cancel_plan` = синоним `/freeze`, мгновенная отмена через `threading.Event` |
+| FEAT-B | `telegram_bot.py`, `modules/policies.py` | `/trigger` → `trigger_force_cycle()` → внеочередной цикл без ожидания |
+| FEAT-C | `backend/api/routes/patches.py`, `frontend/src/pages/PatchesPage.tsx` | `GET /api/patches/{id}/diff`; built-in side-by-side DiffViewer (Tailwind, без npm deps) |
+| FEAT-D | `db/schema.sql`, `db/experiences.py`, `modules/evaluator.py`, `modules/evolution.py`, `backend/api/routes/analytics.py` | Таблица `plan_quality_scores`; взвешенный `overall_score`; quality_block в LLM-промпте; `GET /api/analytics/plan-quality` |
+| FEAT-E | `internal_api/main.py`, `integrations/prelend_client.py`, `modules/tracking.py` | `/health` возвращает `db_size_mb`, `last_click_ago_sec`, `traffic_alive`, `pending_clicks_24h`; `get_health()` в клиенте; `traffic_alive` в snapshot |
+| FEAT-F | `pipeline/download.py`, `pipeline/config.py`, `pipeline/agents/publisher.py` | `retry_failed()` с экспоненциальным backoff; `upload_retry_queue.json`; Publisher обрабатывает retry queue в начале каждого цикла |

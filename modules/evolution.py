@@ -24,6 +24,7 @@ from db.experiences import (
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
 from modules.financial_observer import get_financial_context
+from modules.code_evolver import _sanitize_for_prompt as _san
 from integrations.ollama_client import call_llm
 
 logger = logging.getLogger(__name__)
@@ -107,22 +108,31 @@ def _build_prompt(metrics_data: Dict) -> str:
     active_zones = [name for name, z in zones.items() if z.get("enabled")]
 
     # ── Секция метрик ─────────────────────────────────────────────────────────
+    # Санитизируем внешние данные перед вставкой в LLM-промпт (защита от prompt-injection)
+    _raw_statuses = sp.get("agent_statuses", {})
+    _safe_statuses = {
+        _san(str(k), 50): _san(str(v), 200)
+        for k, v in _raw_statuses.items()
+    }
+    _raw_suspects = pl.get("shave_suspects", [])
+    _safe_suspects = [_san(str(s), 100) for s in _raw_suspects[:10]]
+
     metrics_block = f"""
 === МЕТРИКИ ShortsProject (за {sp.get('period_hours', 24)} ч) ===
 Просмотры: {sp.get('total_views', 0):,}
 Лайки: {sp.get('total_likes', 0):,}
 Средний CTR: {f"{sp.get('avg_ctr', 0):.3f}" if sp.get('avg_ctr') else 'нет данных'}
-Топ платформа: {sp.get('top_platform') or 'нет данных'}
+Топ платформа: {_san(str(sp.get('top_platform') or 'нет данных'), 50)}
 Бан-события: {sp.get('ban_count', 0)}
-Статусы агентов: {json.dumps(sp.get('agent_statuses', {}), ensure_ascii=False)}
+Статусы агентов: {json.dumps(_safe_statuses, ensure_ascii=False)}
 
 === МЕТРИКИ PreLend (за {pl.get('period_hours', 24)} ч) ===
 Кликов: {pl.get('total_clicks', 0):,}
 Конверсий: {pl.get('conversions', 0):,}
 CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
 % ботов: {f"{pl.get('bot_pct', 0):.1f}%" if pl.get('bot_pct') is not None else 'нет данных'}
-Топ ГЕО: {pl.get('top_geo') or 'нет данных'}
-Подозрения на шейв: {pl.get('shave_suspects', [])}
+Топ ГЕО: {_san(str(pl.get('top_geo') or 'нет данных'), 10)}
+Подозрения на шейв: {_safe_suspects}
 """
 
     # ── Качество последних планов ─────────────────────────────────────────────
@@ -130,16 +140,14 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
     if recent_scores:
         quality_block = "\n=== КАЧЕСТВО ПОСЛЕДНИХ ПЛАНОВ (оценка через 24ч) ===\n"
         for s in recent_scores:
-            quality_block += (
-                f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
-                f", views={s['views_delta_pct']:+.1f}%" if s.get('views_delta_pct') is not None else
-                f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
-            )
+            line = f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
+            if s.get('views_delta_pct') is not None:
+                line += f", views={s['views_delta_pct']:+.1f}%"
             if s.get("ctr_delta_pct") is not None:
-                quality_block += f", CTR={s['ctr_delta_pct']:+.1f}%"
+                line += f", CTR={s['ctr_delta_pct']:+.1f}%"
             if s.get("cr_delta_pct") is not None:
-                quality_block += f", CR={s['cr_delta_pct']:+.1f}%"
-            quality_block += "\n"
+                line += f", CR={s['cr_delta_pct']:+.1f}%"
+            quality_block += line + "\n"
     else:
         quality_block = ""
 
@@ -151,7 +159,7 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
         strategist_block = "\n=== РЕКОМЕНДАЦИИ ВНУТРЕННЕГО СТРАТЕГИСТА SP (последние 6ч) ===\n"
         strategist_block += "(можешь опираться на них или переопределить, если метрики говорят иное)\n"
         for agent_key, rec in strategist_recs.items():
-            strategist_block += f"  {agent_key}: {str(rec)[:200]}\n"
+            strategist_block += f"  {_san(str(agent_key), 100)}: {_san(str(rec), 500)}\n"
     else:
         strategist_block = ""
 

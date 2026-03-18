@@ -25,6 +25,7 @@ main_orchestrator.py — Главный цикл Orchestrator.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,26 @@ from commander       import notifier
 from commander       import telegram_bot
 from db.experiences  import mark_plan_applied, mark_plan_failed
 from db.commands     import get_policy, cleanup_expired_policies
+
+# ─────────────────────────────────────────────────────────────────────────────
+# События для межпоточного управления циклом
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Устанавливается telegram_bot при /freeze или /cancel_plan → прерывает ожидание плана
+_cancel_plan: threading.Event = threading.Event()
+
+# Устанавливается telegram_bot при /trigger → запускает внеочередной цикл
+_force_cycle: threading.Event = threading.Event()
+
+
+def cancel_pending_plan() -> None:
+    """Вызывается из telegram_bot для мгновенной отмены ожидающего плана."""
+    _cancel_plan.set()
+
+
+def trigger_force_cycle() -> None:
+    """Вызывается из telegram_bot для запуска внеочередного цикла без ожидания."""
+    _force_cycle.set()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Логирование
@@ -154,15 +175,23 @@ def run_cycle(cycle_num: int = 0) -> None:
             logger.info("[Orchestrator] DRY_RUN — план не применяется")
             return
 
-        # Пауза перед применением (если задана)
+        # Пауза перед применением (если задана) — прерываемая через /freeze или /cancel_plan
         if config.PLAN_APPLY_DELAY_SEC > 0:
             delay_min = config.PLAN_APPLY_DELAY_SEC // 60
             notifier.send_message(
                 f"⏳ <b>Применение плана #{plan_id} через {delay_min} мин.</b>\n"
-                f"Отправьте /freeze чтобы отменить."
+                f"Отправьте /freeze или /cancel_plan чтобы отменить."
             )
             logger.info("  Ожидание %d сек перед применением...", config.PLAN_APPLY_DELAY_SEC)
-            time.sleep(config.PLAN_APPLY_DELAY_SEC)
+            _cancel_plan.clear()
+            cancelled = _cancel_plan.wait(timeout=config.PLAN_APPLY_DELAY_SEC)
+
+            # После ожидания — явная проверка отмены
+            if cancelled or get_policy("pause_evolution"):
+                mark_plan_failed(plan_id)
+                notifier.send_message(f"🛑 <b>План #{plan_id} отменён оператором</b>")
+                logger.warning("[Orchestrator] План #%d отменён во время ожидания", plan_id)
+                return
 
         # ── Шаг 5: Применение конфиг-изменений ───────────────────────────────
         logger.info("[5/8] Применение config_changes...")
@@ -265,8 +294,19 @@ def main() -> None:
             lock_file.close()
 
         cycle_num += 1
+
+        # Проверяем force_cycle ДО ожидания (мог быть установлен в конце предыдущего цикла)
+        if get_policy("force_cycle"):
+            from db.commands import set_policy as _set_policy
+            _set_policy("force_cycle", False)
+            logger.info("Внеочередной цикл (force_cycle из прошлого цикла)")
+            continue
+
         logger.info("Следующий цикл через %d часов", config.CYCLE_INTERVAL_HOURS)
-        time.sleep(cycle_interval_sec)
+        _force_cycle.clear()
+        triggered = _force_cycle.wait(timeout=cycle_interval_sec)
+        if triggered:
+            logger.info("Внеочередной цикл по запросу оператора (/trigger)")
 
 
 if __name__ == "__main__":

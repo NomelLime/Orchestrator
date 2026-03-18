@@ -356,6 +356,9 @@ async def _handle_help(update, context) -> None:
         "/patches — ожидающие патчи кода\n"
         "/approve_N — одобрить патч #N\n"
         "/reject_N — отклонить патч #N\n"
+        "/freeze — отменить текущий ожидающий план\n"
+        "/cancel_plan — то же что /freeze (синоним)\n"
+        "/trigger — запустить внеочередной цикл немедленно\n"
         "/help — эта справка\n\n"
         "<b>Подтверждение прокси:</b>\n"
         "  да 7 — выполнить запрос #7\n"
@@ -369,6 +372,33 @@ async def _handle_help(update, context) -> None:
         "  «откати последний план»",
         parse_mode="HTML"
     )
+
+
+async def _handle_freeze(update, context) -> None:
+    """/freeze — мгновенная отмена ожидающего плана."""
+    if not _is_authorized(update):
+        return
+    from main_orchestrator import cancel_pending_plan
+    cancel_pending_plan()
+    await update.message.reply_text(
+        "🛑 Сигнал отмены плана отправлен.\n"
+        "Если план был в ожидании — он будет помечен failed.",
+        parse_mode="HTML"
+    )
+
+
+async def _handle_cancel_plan(update, context) -> None:
+    """/cancel_plan — синоним /freeze."""
+    await _handle_freeze(update, context)
+
+
+async def _handle_trigger(update, context) -> None:
+    """/trigger — запустить внеочередной цикл немедленно."""
+    if not _is_authorized(update):
+        return
+    from main_orchestrator import trigger_force_cycle
+    trigger_force_cycle()
+    await update.message.reply_text("⚡ Внеочередной цикл запущен.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,12 +418,15 @@ def run_bot() -> None:
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("zones",     _handle_zones))
-    app.add_handler(CommandHandler("last_plan", _handle_last_plan))
-    app.add_handler(CommandHandler("status",    _handle_status))
-    app.add_handler(CommandHandler("proxies",   _handle_proxies))
-    app.add_handler(CommandHandler("patches",   _handle_patches))
-    app.add_handler(CommandHandler("help",      _handle_help))
+    app.add_handler(CommandHandler("zones",       _handle_zones))
+    app.add_handler(CommandHandler("last_plan",   _handle_last_plan))
+    app.add_handler(CommandHandler("status",      _handle_status))
+    app.add_handler(CommandHandler("proxies",     _handle_proxies))
+    app.add_handler(CommandHandler("patches",     _handle_patches))
+    app.add_handler(CommandHandler("freeze",      _handle_freeze))
+    app.add_handler(CommandHandler("cancel_plan", _handle_cancel_plan))
+    app.add_handler(CommandHandler("trigger",     _handle_trigger))
+    app.add_handler(CommandHandler("help",        _handle_help))
     # /approve_N и /reject_N — динамические команды с суффиксом ID
     # python-telegram-bot CommandHandler принимает команды с аргументами,
     # но /approve_7 парсится как команда "approve_7" (без аргументов).

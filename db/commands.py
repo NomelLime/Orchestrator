@@ -15,12 +15,23 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from db.connection import get_db
 
 logger = logging.getLogger(__name__)
+
+
+def _is_expired(expires_at_str: str) -> bool:
+    """Проверяет истечение политики. Безопасно для naive и aware datetime."""
+    try:
+        dt = datetime.fromisoformat(expires_at_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt < datetime.now(timezone.utc)
+    except Exception:
+        return False
 
 
 def save_command(
@@ -54,7 +65,7 @@ def mark_command_applied(command_id: int) -> None:
     with get_db() as conn:
         conn.execute(
             "UPDATE operator_commands SET status = 'applied', applied_at = ? WHERE id = ?",
-            (datetime.now().isoformat(timespec="seconds"), command_id)
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), command_id)
         )
 
 
@@ -117,11 +128,8 @@ def get_policy(key: str) -> Optional[Any]:
 
     # Проверяем срок действия
     if row["expires_at"]:
-        try:
-            if datetime.fromisoformat(row["expires_at"]) < datetime.now():
-                return None
-        except Exception:
-            pass
+        if _is_expired(row["expires_at"]):
+            return None
 
     try:
         return json.loads(row["value_json"])
@@ -137,14 +145,9 @@ def get_all_policies() -> Dict[str, Any]:
         ).fetchall()
 
     policies = {}
-    now = datetime.now()
     for row in rows:
-        if row["expires_at"]:
-            try:
-                if datetime.fromisoformat(row["expires_at"]) < now:
-                    continue
-            except Exception:
-                pass
+        if row["expires_at"] and _is_expired(row["expires_at"]):
+            continue
         try:
             policies[row["key"]] = json.loads(row["value_json"])
         except Exception:
@@ -162,7 +165,7 @@ def cleanup_expired_policies() -> int:
     with get_db() as conn:
         cursor = conn.execute(
             "DELETE FROM operator_policies WHERE expires_at IS NOT NULL AND expires_at < ?",
-            (datetime.now().isoformat(timespec="seconds"),)
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"),)
         )
         deleted = cursor.rowcount
     if deleted:

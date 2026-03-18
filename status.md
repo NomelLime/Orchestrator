@@ -506,3 +506,16 @@ PreLend перенесён на VPS — прямой доступ к его фа
 | FIX#11 | Medium | `modules/evolution.py` | Убран запутанный тернарный оператор в `quality_block` — заменён на читаемый `if`-chain |
 | FIX#12 | Medium | `db/patches.py` | `datetime('now')` SQLite → `datetime.now(timezone.utc).isoformat()` во всех `mark_patch_*()` |
 | FIX#4 | High | `.env.example` | Добавлена инструкция по генерации `PL_INTERNAL_API_KEY` |
+
+### Code Review v2 (18.03.2026) — дополнительные исправления после верификации
+
+| # | Severity | Файл(ы) | Исправление |
+|---|----------|---------|-------------|
+| FIX#2b | Critical | `modules/code_evolver.py` | `_sanitize_for_prompt` (приватная, regex `[\x00-\x1f\x7f]`) → публичная `sanitize_for_prompt` с `unicodedata.category(c) not in ('Cc', 'Cf')`. Закрывает Unicode direction overrides (U+202E), zero-width chars и прочие invisible injection vectors |
+| FIX#2c | Critical | `modules/evolution.py` | Импорт обновлён: `from modules.code_evolver import _sanitize_for_prompt as _san` → `sanitize_for_prompt as _san` |
+| BUG-C | High | `tests/conftest.py` | `init_database` fixture была мёртвым кодом после `return mock` внутри `mock_prelend_client`. Pytest не видел фикстуру → 17 тестов падали с `fixture 'init_database' not found`. Вынесена как отдельная `@pytest.fixture` |
+| BUG-D | Medium | `tests/test_db_zones.py` | `apply_zone_decay()` имеет глобальный guard `_last_decay_date`. При запуске suite guard уже установлен → `test_decay_after_threshold` пропускал decay → `after == before`. Добавлен сброс `_zones_mod._last_decay_date = None` перед вызовом |
+| BUG-E | Low | `tests/test_evolution.py` | `assert "1000" in prompt` — `total_views` форматируется как `{:,}` → `"1,000"`. Исправлено: `assert "1,000" in prompt` |
+
+**Статус тестов после всех исправлений:**
+- `python -m pytest tests/ -q` → **45/45** ✅

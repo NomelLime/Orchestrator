@@ -85,6 +85,31 @@ logger = logging.getLogger("Orchestrator")
 # Главный цикл
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cleanup_old_data() -> None:
+    """Удаляет устаревшие записи из БД. Вызывается раз в сутки (по cycle_num)."""
+    from db.connection import get_db as _get_db
+    try:
+        with _get_db() as conn:
+            deleted_metrics = conn.execute(
+                "DELETE FROM metrics_snapshots WHERE created_at < datetime('now', '-90 days')"
+            ).rowcount
+            deleted_notif = conn.execute(
+                "DELETE FROM notifications WHERE created_at < datetime('now', '-30 days')"
+            ).rowcount
+            deleted_plans = conn.execute(
+                "DELETE FROM evolution_plans "
+                "WHERE created_at < datetime('now', '-180 days') AND status != 'applied'"
+            ).rowcount
+            conn.commit()
+        if deleted_metrics or deleted_notif or deleted_plans:
+            logger.info(
+                "[Cleanup] Удалено устаревших записей: metrics=%d, notifications=%d, plans=%d",
+                deleted_metrics, deleted_notif, deleted_plans,
+            )
+    except Exception as exc:
+        logger.warning("[Cleanup] Ошибка очистки: %s", exc)
+
+
 def run_cycle(cycle_num: int = 0) -> None:
     """Один полный цикл Orchestrator. cycle_num используется для throttle-логики."""
     cycle_start = datetime.now()
@@ -97,8 +122,11 @@ def run_cycle(cycle_num: int = 0) -> None:
         if evaluated:
             logger.info("[0/7] Ретроспективная оценка: %d изменений оценено", evaluated)
 
-        # ── Шаг 0.5: Очистка истекших политик ──────────────────────────────
+        # ── Шаг 0.5: Очистка истекших политик + суточная уборка БД ──────────
         cleanup_expired_policies()
+        cycles_per_day = max(1, 24 // max(config.CYCLE_INTERVAL_HOURS, 1))
+        if cycle_num % cycles_per_day == 0:
+            _cleanup_old_data()
 
         # ── Шаг 1: Деградация зон ────────────────────────────────────────────
         logger.info("[1/7] Деградация зон...")

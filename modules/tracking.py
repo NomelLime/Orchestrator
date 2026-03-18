@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -74,7 +74,7 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
     # ── analytics.json ───────────────────────────────────────────────────────
     analytics = _safe_read_json(config.SP_ANALYTICS_FILE)
     if analytics:
-        cutoff = datetime.now() - timedelta(hours=period_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=period_hours)
         platform_views: Dict[str, int] = {}
         ctr_values: List[float] = []
         recent_uploads: List[Dict] = []
@@ -90,10 +90,14 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
                 uploaded_at_str = upload.get("uploaded_at")
                 if uploaded_at_str:
                     try:
-                        if datetime.fromisoformat(uploaded_at_str) < cutoff:
+                        uploaded_dt = datetime.fromisoformat(uploaded_at_str)
+                        # Нормализуем: если naive — считаем UTC
+                        if uploaded_dt.tzinfo is None:
+                            uploaded_dt = uploaded_dt.replace(tzinfo=timezone.utc)
+                        if uploaded_dt < cutoff:
                             continue
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError):
+                        pass  # невалидная дата — не фильтруем
 
                 views    = upload.get("views") or 0
                 likes    = upload.get("likes") or 0

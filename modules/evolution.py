@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import config
@@ -277,7 +277,7 @@ CTR и абсолютные просмотры — промежуточные и
 """
 
     return (
-        f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"Дата: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC\n\n"
         + metrics_block
         + strategist_block
         + zones_block

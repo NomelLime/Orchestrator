@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from db.connection  import get_db
@@ -63,7 +63,7 @@ def evaluate_pending_changes() -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_unevaluated_changes() -> List[Dict]:
-    cutoff = _shift_hours(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), -_MIN_AGE_HOURS)
+    cutoff = _shift_hours(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), -_MIN_AGE_HOURS)
     with get_db() as conn:
         rows = conn.execute("""
             SELECT id, applied_at, repo, zone, description, change_type

@@ -425,6 +425,15 @@ PreLend перенесён на VPS — прямой доступ к его фа
 | `main_orchestrator.py` | Нет уведомления перед sleep | + Telegram «⏳ Применение через N мин. /freeze» |
 | `modules/code_evolver.py` | Нет санитизации `goal` и `file_name` перед LLM | + `_sanitize_for_prompt(value, max_len)` — удаляет управляющие символы, обрезает |
 
+**Исправления дельта-ревью (сессия 9):**
+
+| Файл | Проблема | Исправление |
+|------|----------|-------------|
+| `modules/tracking.py` | `datetime.now()` без timezone — сравнение с aware datetime бросало `TypeError` | `datetime.now(timezone.utc)`, нормализация `uploaded_at` через `.replace(tzinfo=timezone.utc)` если naive |
+| `modules/evolution.py` | `datetime.now()` без timezone в промпте | `datetime.now(timezone.utc)` + `import timezone` |
+| `modules/evaluator.py` | `datetime.now()` без timezone в cutoff | `datetime.now(timezone.utc)` + `import timezone` |
+| `commander/notifier.py` | `datetime.now()` без timezone | Оставлен намеренно локальным (дайджест по локальному часу), добавлен комментарий |
+
 **Фиксы дельта-ревью (сессия 8, часть 2):**
 
 | Файл | Проблема | Исправление |

@@ -189,15 +189,17 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         shave_suspects, analyst_verdicts
     """
     _empty: Dict[str, Any] = {
-        "period_hours":     period_hours,
-        "total_clicks":     0,
-        "conversions":      0,
-        "cr":               None,
-        "bot_pct":          None,
-        "top_geo":          None,
-        "shave_suspects":   [],
-        "analyst_verdicts": {},
-        "_unreachable":     True,
+        "period_hours":       period_hours,
+        "total_clicks":       0,
+        "conversions":        0,
+        "cr":                 None,
+        "bot_pct":            None,
+        "top_geo":            None,
+        "shave_suspects":     [],
+        "analyst_verdicts":   {},
+        "traffic_alive":      None,
+        "last_click_ago_sec": None,
+        "_unreachable":       True,
     }
 
     from integrations.prelend_client import get_client
@@ -216,29 +218,34 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         logger.warning("[Tracking] PreLend API вернул пустой ответ — PL метрики обнулены")
         return _empty
 
+    # Запрашиваем /health для traffic_alive и last_click_ago_sec
+    health = client.get_health() or {}
+
     # API возвращает данные уже в нужном формате
     result: Dict[str, Any] = {
-        "period_hours":     period_hours,
-        "total_clicks":     data.get("total_clicks", 0),
-        "conversions":      data.get("conversions", 0),
-        "cr":               data.get("cr"),
-        "bot_pct":          data.get("bot_pct"),
-        "top_geo":          data.get("top_geo"),
-        "shave_suspects":   [
+        "period_hours":       period_hours,
+        "total_clicks":       data.get("total_clicks", 0),
+        "conversions":        data.get("conversions", 0),
+        "cr":                 data.get("cr"),
+        "bot_pct":            data.get("bot_pct"),
+        "top_geo":            data.get("top_geo"),
+        "shave_suspects":     [
             s["id"] if isinstance(s, dict) else s
             for s in data.get("shave_suspects", [])
         ],
-        "analyst_verdicts": data.get("analyst_verdicts", {}),
-        "_unreachable":     False,
+        "analyst_verdicts":   data.get("analyst_verdicts", {}),
+        "traffic_alive":      health.get("traffic_alive"),
+        "last_click_ago_sec": health.get("last_click_ago_sec"),
+        "_unreachable":       False,
     }
 
     logger.info(
-        "[Tracking] PreLend: clicks=%d, CR=%.3f, bots=%.1f%%, geo=%s, shave_suspects=%d",
+        "[Tracking] PreLend: clicks=%d, CR=%.3f, bots=%.1f%%, geo=%s, traffic_alive=%s",
         result["total_clicks"],
         result["cr"] or 0,
         result["bot_pct"] or 0,
         result["top_geo"] or "?",
-        len(result["shave_suspects"]),
+        result["traffic_alive"],
     )
     return result
 

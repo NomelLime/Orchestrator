@@ -53,6 +53,14 @@ class PreLendClient:
         except Exception:
             return False
 
+    def get_health(self) -> Optional[Dict]:
+        """Возвращает расширенные данные /health или None при недоступности."""
+        try:
+            r = self._session.get(f"{self._base}/health", timeout=5)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
     @property
     def base_url(self) -> str:
         """URL Internal API (для логирования)."""

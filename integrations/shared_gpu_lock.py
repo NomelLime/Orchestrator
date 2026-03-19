@@ -34,7 +34,8 @@ def acquire_gpu_lock(consumer: str = "unknown", timeout: float = 120.0):
     """
     Context manager that acquires the cross-project GPU file lock.
     Blocks until the lock is available or timeout is reached.
-    On timeout: logs a warning and proceeds without the lock (graceful degradation).
+    On timeout: raises TimeoutError. Caller decides how to handle
+    (skip inference, retry later, use fallback).
 
     Args:
         consumer: label used in log messages (e.g. "Orchestrator-Evolution")
@@ -77,14 +78,15 @@ def acquire_gpu_lock(consumer: str = "unknown", timeout: float = 120.0):
 
     if not acquired:
         logger.warning(
-            "[GPU-Lock] Timeout (%ds) waiting for GPU lock (%s) — proceeding without lock",
+            "[GPU-Lock] Timeout (%ds) for %s — GPU busy, raising TimeoutError",
             int(timeout), consumer,
         )
+        raise TimeoutError(f"GPU lock timeout ({int(timeout)}s) for {consumer}")
 
     try:
         yield
     finally:
-        if acquired and lock_file:
+        if lock_file:
             try:
                 import portalocker as _pl
                 _pl.unlock(lock_file)

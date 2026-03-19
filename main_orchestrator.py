@@ -86,26 +86,45 @@ logger = logging.getLogger("Orchestrator")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cleanup_old_data() -> None:
-    """Удаляет устаревшие записи из БД. Вызывается раз в сутки (по cycle_num)."""
+    """
+    Удаляет устаревшие записи из БД порциями. Вызывается раз в сутки.
+
+    Батчевое удаление по 500 строк — не блокирует SQLite WAL надолго
+    при накоплении больших таблиц (10K+ строк за период).
+    """
     from db.connection import get_db as _get_db
+
+    # (table, age_expr, extra_where)
+    # Имена таблиц — hardcoded, не от пользователя — SQL injection невозможен
+    _tables = [
+        ("metrics_snapshots", "90 days",  ""),
+        ("notifications",     "30 days",  ""),
+        ("evolution_plans",   "180 days", "AND status != 'applied'"),
+    ]
+
+    total_deleted = 0
     try:
         with _get_db() as conn:
-            deleted_metrics = conn.execute(
-                "DELETE FROM metrics_snapshots WHERE created_at < datetime('now', '-90 days')"
-            ).rowcount
-            deleted_notif = conn.execute(
-                "DELETE FROM notifications WHERE created_at < datetime('now', '-30 days')"
-            ).rowcount
-            deleted_plans = conn.execute(
-                "DELETE FROM evolution_plans "
-                "WHERE created_at < datetime('now', '-180 days') AND status != 'applied'"
-            ).rowcount
+            for table, age, extra in _tables:
+                deleted_table = 0
+                # Удаляем порциями по 500 строк — не блокируем WAL надолго
+                while True:
+                    cur = conn.execute(
+                        f"DELETE FROM {table} WHERE rowid IN "
+                        f"(SELECT rowid FROM {table} "
+                        f" WHERE created_at < datetime('now', '-{age}') {extra} "
+                        f" LIMIT 500)"
+                    )
+                    batch = cur.rowcount
+                    deleted_table += batch
+                    if batch < 500:
+                        break  # все устаревшие удалены
+                if deleted_table:
+                    logger.info("[Cleanup] %s: удалено %d строк", table, deleted_table)
+                total_deleted += deleted_table
             conn.commit()
-        if deleted_metrics or deleted_notif or deleted_plans:
-            logger.info(
-                "[Cleanup] Удалено устаревших записей: metrics=%d, notifications=%d, plans=%d",
-                deleted_metrics, deleted_notif, deleted_plans,
-            )
+        if total_deleted:
+            logger.info("[Cleanup] Всего удалено: %d строк", total_deleted)
     except Exception as exc:
         logger.warning("[Cleanup] Ошибка очистки: %s", exc)
 
@@ -120,7 +139,7 @@ def run_cycle(cycle_num: int = 0) -> None:
         # ── Шаг 0: Ретроспективная оценка изменений (24h delayed) ────────────
         evaluated = evaluator.evaluate_pending_changes()
         if evaluated:
-            logger.info("[0/7] Ретроспективная оценка: %d изменений оценено", evaluated)
+            logger.info("[0/9] Ретроспективная оценка: %d изменений оценено", evaluated)
 
         # ── Шаг 0.5: Очистка истекших политик + суточная уборка БД ──────────
         cleanup_expired_policies()
@@ -129,11 +148,11 @@ def run_cycle(cycle_num: int = 0) -> None:
             _cleanup_old_data()
 
         # ── Шаг 1: Деградация зон ────────────────────────────────────────────
-        logger.info("[1/7] Деградация зон...")
+        logger.info("[1/9] Деградация зон...")
         zones_module.run_decay()
 
         # ── Шаг 2: Команды оператора ─────────────────────────────────────────
-        logger.info("[2/7] Обработка команд оператора...")
+        logger.info("[2/9] Обработка команд оператора...")
         n_commands = policies.process_pending_commands()
         if n_commands:
             logger.info("  Обработано команд: %d", n_commands)
@@ -144,7 +163,7 @@ def run_cycle(cycle_num: int = 0) -> None:
             return
 
         # ── Шаг 3: Сбор метрик ───────────────────────────────────────────────
-        logger.info("[3/7] Сбор метрик...")
+        logger.info("[3/9] Сбор метрик...")
         metrics_data = tracking.collect_all_and_save()
 
         sp = metrics_data["shorts_project"]
@@ -159,22 +178,22 @@ def run_cycle(cycle_num: int = 0) -> None:
         reverted = code_evolver.check_and_revert_on_crash()
 
         if reverted:
-            logger.warning("[3.5/7] Краш-луп: автооткат выполнен — пропускаем генерацию плана")
+            logger.warning("[4/9] Краш-луп: автооткат выполнен — пропускаем генерацию плана")
             return
 
         # ── Шаг 3.6: SP Pipeline manager ─────────────────────────────────────
-        logger.info("[3.6/8] SP Pipeline manager...")
+        logger.info("[5/9] SP Pipeline manager...")
         sp_runner.manage_sp_pipeline(metrics_data)
 
         # ── Шаг 3.7: Мониторинг прокси (раз в N циклов) ──────────────────────
         if cycle_num % config.SUPPLY_CHECK_EVERY_N_CYCLES == 0:
-            logger.info("[3.7/8] Проверка прокси/баланса...")
+            logger.info("[6/9] Проверка прокси/баланса...")
             supply_requests = supply_tracker.check_supply(sp)
             if supply_requests:
                 logger.info("  Отправлено запросов оператору: %d", supply_requests)
 
         # ── Шаг 4: Генерация плана ───────────────────────────────────────────
-        logger.info("[4/8] Генерация плана эволюции (LLM)...")
+        logger.info("[7/9] Генерация плана эволюции (LLM)...")
         plan = evolution.generate_plan(metrics_data)
 
         if not plan:
@@ -222,7 +241,7 @@ def run_cycle(cycle_num: int = 0) -> None:
                 return
 
         # ── Шаг 5: Применение конфиг-изменений ───────────────────────────────
-        logger.info("[5/8] Применение config_changes...")
+        logger.info("[8/9] Применение config_changes...")
         cfg_ok, cfg_fail = config_enforcer.apply_config_changes(plan, plan_id)
         logger.info("  Конфиги: успешно=%d, ошибок=%d", cfg_ok, cfg_fail)
         if cfg_ok or cfg_fail:
@@ -233,7 +252,7 @@ def run_cycle(cycle_num: int = 0) -> None:
             )
 
         # ── Шаг 6: Патчи кода (двухшаговый: одобрение → применение) ─────────
-        logger.info("[6/8] Code patches (Zone 4)...")
+        logger.info("[8/9] Code patches (Zone 4)...")
 
         # 6a. Применяем ранее одобренные патчи (из прошлых циклов)
         code_ok, code_fail = code_evolver.apply_approved_patches()
@@ -266,7 +285,7 @@ def run_cycle(cycle_num: int = 0) -> None:
         # Если только queued (без cfg_ok/code_ok) — план остаётся pending до применения
 
         # ── Шаг 7: Суточный дайджест ─────────────────────────────────────────
-        logger.info("[7/8] Проверка суточного дайджеста...")
+        logger.info("[9/9] Проверка суточного дайджеста...")
         notifier.send_daily_digest_if_due()
 
     except Exception as exc:

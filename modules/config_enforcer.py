@@ -100,14 +100,129 @@ def _apply_sp_config_change(change: Dict, plan_id: int, zone: str) -> bool:
         return _apply_sp_schedule(change, plan_id, zone, description)
 
     elif scope == "visual":
-        # TODO (Zone 2): изменение параметров уникализации
-        # Нужно реализовать когда Zone 2 достигнет нужного confidence_score
-        logger.info("[ConfigEnforcer] Visual scope — TODO (Zone 2 не реализована)")
-        return False
+        return _apply_sp_visual(change, plan_id, zone, description)
 
     else:
         logger.warning("[ConfigEnforcer] Неизвестный SP scope: %s", scope)
         return False
+
+
+# Whitelist разрешённых визуальных фильтров — не даём LLM передавать произвольные ffmpeg-команды
+_SP_ALLOWED_VISUAL_FILTERS = frozenset({
+    "none", "warm", "cold", "vibrant", "muted", "high_contrast",
+    "sepia", "grayscale", "vintage", "vhs", "film_grain",
+    "vignette", "vignette_strong", "sharpen", "soft",
+    "cinematic", "dreamy", "neon", "moody",
+})
+
+
+def _apply_sp_visual(
+    change: Dict, plan_id: int, zone: str, description: str
+) -> bool:
+    """
+    Обновляет visual_filter в account/config.json аккаунтов ShortsProject.
+
+    Реализует Zone 2 (visual) Orchestrator.
+    LLM генерирует план с scope="visual" → этот метод записывает фильтр
+    в config.json → Editor применяет при следующей обработке видео
+    → через 24ч evaluator сравнивает CTR/views.
+
+    Формат change из LLM-плана:
+        {
+            "scope": "visual",
+            "description": "cinematic фильтр для повышения retention",
+            "accounts": ["all"],          // или конкретные имена
+            "param": "visual_filter",
+            "new_value": "cinematic"
+        }
+
+    Args:
+        change:      dict из LLM-плана (targets.shorts_project.config_changes[i])
+        plan_id:     ID плана в evolution_plans
+        zone:        имя зоны ("visual")
+        description: описание изменения для лога
+
+    Returns:
+        True если хотя бы один аккаунт успешно обновлён.
+    """
+    filter_name = str(change.get("new_value", "none")).strip()
+
+    # Whitelist-проверка — безопасность: LLM не может передать произвольный ffmpeg
+    if filter_name not in _SP_ALLOWED_VISUAL_FILTERS:
+        logger.warning(
+            "[ConfigEnforcer] Фильтр '%s' не в whitelist — пропуск. "
+            "Разрешённые: %s",
+            filter_name, sorted(_SP_ALLOWED_VISUAL_FILTERS),
+        )
+        return False
+
+    accounts_spec = change.get("accounts", ["all"])
+    if "all" in accounts_spec:
+        target_accounts = [a["name"] for a in sp_integration.get_all_accounts()]
+    else:
+        target_accounts = list(accounts_spec)
+
+    if not target_accounts:
+        logger.warning("[ConfigEnforcer] Zone 2: нет аккаунтов для обновления")
+        return False
+
+    updated = 0
+    for acc_name in target_accounts:
+        cfg_path = config.SP_ACCOUNTS_DIR / acc_name / "config.json"
+        if not cfg_path.exists():
+            logger.debug("[ConfigEnforcer] Zone 2: аккаунт не найден: %s", acc_name)
+            continue
+
+        try:
+            acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[ConfigEnforcer] Zone 2: не удалось прочитать %s: %s", cfg_path, exc)
+            continue
+
+        old_filter = acc_cfg.get("visual_filter", "none")
+        if old_filter == filter_name:
+            logger.debug("[ConfigEnforcer] Zone 2: %s — фильтр не изменился (%s)", acc_name, filter_name)
+            continue
+
+        # Snapshot перед изменением (для self-healing / отката)
+        snapshot_config(acc_name, str(cfg_path), plan_id)
+
+        acc_cfg["visual_filter"] = filter_name
+
+        # Атомичная запись (temp → rename, не теряем данные при краше)
+        _atomic_write_json(cfg_path, acc_cfg)
+
+        # Git commit в ShortsProject
+        try:
+            git_tools.commit_change(
+                repo_dir=config.SHORTS_PROJECT_DIR,
+                file_path=cfg_path,
+                message=f"[Orchestrator/visual] {acc_name}: filter={filter_name}",
+            )
+        except Exception as exc:
+            logger.warning("[ConfigEnforcer] Zone 2: git commit не удался для %s: %s", acc_name, exc)
+
+        # Запись в experiences (для evaluator через 24ч)
+        save_applied_change(
+            plan_id=plan_id,
+            change_type="config_change",
+            repo="ShortsProject",
+            zone=zone,
+            description=description or f"visual_filter {acc_name}: {old_filter} → {filter_name}",
+            file_path=str(cfg_path.relative_to(config.SHORTS_PROJECT_DIR)),
+            old_value={"visual_filter": old_filter},
+            new_value={"visual_filter": filter_name},
+            test_status="skipped",
+        )
+
+        logger.info(
+            "[ConfigEnforcer] Zone 2: %s visual_filter: %s → %s",
+            acc_name, old_filter, filter_name,
+        )
+        updated += 1
+
+    logger.info("[ConfigEnforcer] Zone 2: обновлено аккаунтов: %d / %d", updated, len(target_accounts))
+    return updated > 0
 
 
 def _apply_sp_schedule(

@@ -27,6 +27,40 @@ from modules.financial_observer import get_financial_context
 from modules.code_evolver import sanitize_for_prompt as _san
 from integrations.ollama_client import call_llm
 
+
+def _safe_finances_block(finances: dict) -> str:
+    """
+    Формирует finances_block из get_financial_context() с санитизацией строк (FIX#V3-5).
+
+    Числовые поля (net_roi_rub, roi_pct и др.) безопасны.
+    Строковые поля и ключи словарей by_source санитизируются через sanitize_for_prompt.
+
+    Args:
+        finances: dict от get_financial_context()
+
+    Returns:
+        Отформатированная строка для LLM-промпта или "" если finances пустой.
+    """
+    if not finances:
+        return ""
+
+    lines = ["\n=== ФИНАНСЫ (последние 30 дней) ==="]
+    for key, value in finances.items():
+        if isinstance(value, str):
+            value = _san(value, 200)
+        elif isinstance(value, dict):
+            # by_source — вложенный dict с названиями источников (внешние данные)
+            safe_dict = {}
+            for k, v in value.items():
+                safe_k = _san(str(k), 50)
+                safe_v = _san(str(v), 100) if isinstance(v, str) else v
+                safe_dict[safe_k] = safe_v
+            value = safe_dict
+        # Числовые значения (int/float) не требуют санитизации
+        lines.append(f"  {key}: {value}")
+    return "\n".join(lines) + "\n"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,6 +140,8 @@ def _build_prompt(metrics_data: Dict) -> str:
 
     finances  = get_financial_context(days=30)
     active_zones = [name for name, z in zones.items() if z.get("enabled")]
+    # Формируем finances_block с санитизацией (FIX#V3-5)
+    finances_block = _safe_finances_block(finances)
 
     # ── Секция метрик ─────────────────────────────────────────────────────────
     # Санитизируем внешние данные перед вставкой в LLM-промпт (защита от prompt-injection)
@@ -320,6 +356,7 @@ CTR и абсолютные просмотры — промежуточные и
     return (
         f"Дата: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC\n\n"
         + metrics_block
+        + finances_block
         + quality_block
         + strategist_block
         + zones_block

@@ -519,3 +519,32 @@ PreLend перенесён на VPS — прямой доступ к его фа
 
 **Статус тестов после всех исправлений:**
 - `python -m pytest tests/ -q` → **45/45** ✅
+
+---
+
+### Сессия 11 (19.03.2026) — Zone 2 (visual) реализована + тесты config_enforcer
+
+**Zone 2 статус:** ✅ **Реализована и активирована** (score 50→70, enabled=1)
+
+**Изменения:**
+
+| Файл | Изменение |
+|------|-----------|
+| `modules/config_enforcer.py` | `_apply_sp_visual()`: заменяет TODO-заглушку. Whitelist 18 фильтров (не позволяет LLM передавать произвольные ffmpeg-команды). Записывает `visual_filter` в account `config.json`, делает snapshot (self-healing), git commit, `save_applied_change` (для evaluator). |
+| `modules/config_enforcer.py` | `_SP_ALLOWED_VISUAL_FILTERS`: frozenset — whitelist разрешённых значений |
+| `modules/evolution.py` | Добавлен пример `scope: "visual"` в JSON-шаблон промпта. Зонам добавлены подсказки (`_zone_hints`) — LLM знает что менять в каждой зоне |
+| `main_orchestrator.py` | При запуске: `UPDATE zones SET confidence_score=70, enabled=1 WHERE zone_name='visual' AND confidence_score<=50` (идемпотентно) |
+| `tests/test_config_enforcer.py` | 6 тестов: allowed filter, disallowed (whitelist injection block), same filter no-op, none filter, empty accounts, whitelist completeness |
+
+**Схема Zone 2 в production:**
+```
+LLM-план с scope="visual", new_value="cinematic"
+    → _apply_sp_visual() проверяет whitelist
+    → записывает visual_filter в account/config.json
+    → Editor._get_account_visual_filter() читает при обработке видео
+    → postprocessor вставляет фильтр в filter_complex
+    → через 24ч evaluator сравнивает CTR/views (applied_changes запись)
+```
+
+**Статус тестов:**
+- `python -m pytest tests/ -q` → **51/51** ✅ (был 45, +6 новых)

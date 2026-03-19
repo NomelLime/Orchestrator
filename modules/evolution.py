@@ -164,11 +164,18 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
         strategist_block = ""
 
     # ── Секция зон ────────────────────────────────────────────────────────────
+    _zone_hints = {
+        "scheduling": "upload_schedule в config.json аккаунтов",
+        "visual":     "visual_filter в config.json аккаунтов (см. пример в формате ниже)",
+        "prelend":    "settings.json и advertisers.json (пороги алертов, ставки)",
+        "code":       "Python-файлы ShortsProject (требуют /approve от оператора)",
+    }
     zones_block = "=== ДОСТУПНЫЕ ЗОНЫ ===\n"
     for name in ("scheduling", "visual", "prelend", "code"):
         z      = zones.get(name, {})
         status = "✅ АКТИВНА" if z.get("enabled") else "⛔ НЕАКТИВНА"
-        zones_block += f"  {name}: {status} (confidence={z.get('confidence_score', 0)})\n"
+        hint   = _zone_hints.get(name, "")
+        zones_block += f"  {name}: {status} (confidence={z.get('confidence_score', 0)}) — {hint}\n"
 
     # ── Секция опыта с реальными результатами ─────────────────────────────────
     experience_block = "=== ПРОШЛЫЕ ЭКСПЕРИМЕНТЫ И ИХ РЕЗУЛЬТАТЫ ===\n"
@@ -268,6 +275,13 @@ CTR и абсолютные просмотры — промежуточные и
           "platform": "tiktok",
           "param": "upload_schedule",
           "new_value": ["20:00", "22:00"]
+        },
+        {
+          "scope": "visual",
+          "description": "применить cinematic фильтр — A/B тест визуального стиля для повышения retention",
+          "accounts": ["all"],
+          "param": "visual_filter",
+          "new_value": "cinematic"
         }
       ],
       "code_patches": [

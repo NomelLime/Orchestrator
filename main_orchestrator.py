@@ -298,6 +298,19 @@ def main() -> None:
     # Инициализация БД (идемпотентно — безопасно запускать повторно)
     init_db()
 
+    # Zone 2 (visual): поднимаем score 50 → 70 и включаем зону (Сессия 11)
+    # Выполняется только если score ещё не поднимался (идемпотентно).
+    try:
+        from db.connection import get_db as _get_db_main
+        with _get_db_main() as _conn:
+            _conn.execute(
+                "UPDATE zones SET confidence_score = 70, enabled = 1 "
+                "WHERE zone_name = 'visual' AND confidence_score <= 50"
+            )
+        logger.info("[Orchestrator] Zone 2 (visual): score → 70, enabled=1")
+    except Exception as _ze:
+        logger.warning("[Orchestrator] Zone 2 migration не удалась: %s", _ze)
+
     # Запуск Telegram-бота в фоновом потоке
     telegram_bot.start_bot_thread()
 

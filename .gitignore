@@ -2,3 +2,121 @@ venv/
 db/
 __pycache__/
 .pytest_cache/
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Orchestrator — .gitignore
+# Python 3.11+ | SQLite | Ollama (локально) | Telegram Bot | portalocker
+# Dev: Windows + NVIDIA GPU | управляет ShortsProject + PreLend
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── СЕКРЕТЫ И ОКРУЖЕНИЕ ────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+
+# ── БАЗА ДАННЫХ И RUNTIME-ДАННЫЕ ─────────────────────────────────────────────
+# orchestrator.db — главная БД: zones, plans, patches, metrics_snapshots и т.д.
+data/orchestrator.db
+data/orchestrator.db-wal
+data/orchestrator.db-shm
+data/orchestrator.db-journal
+
+# agent_memory.json — live-состояние агентов, меняется в каждом цикле
+data/agent_memory.json
+
+# Блокировочный файл главного цикла (portalocker)
+data/.cycle.lock
+.cycle.lock
+
+# Разрешаем только SQL-схему
+!data/schema.sql
+!data/init_db.sql
+!data/.gitkeep
+
+
+# ── ЛОГИ ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+*.log.*
+data/orchestrator.log
+data/pipeline.log
+
+
+# ── PYTHON CACHE ──────────────────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+
+# ── ВИРТУАЛЬНЫЕ ОКРУЖЕНИЯ ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+
+
+# ── ТЕСТЫ И COVERAGE ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+
+
+# ── ИНСТРУМЕНТЫ КАЧЕСТВА КОДА ─────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+
+# ── TEMP / РАБОЧИЕ ФАЙЛЫ ──────────────────────────────────────────────────────
+temp/
+tmp/
+# Временные файлы патчей (до применения)
+*.patch.tmp
+*.diff.tmp
+
+
+# ── СЛУЖЕБНЫЕ ФАЙЛЫ ПРОЕКТА ───────────────────────────────────────────────────
+status.md
+session*.md
+*_dev_plan.md
+
+# Экспортированные планы эволюции (если вывод в файлы)
+evolution_plans/
+exported_plans/
+
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+._*
+$RECYCLE.BIN/
+
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+*.bak
+
+
+# ── PACKAGING ─────────────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg

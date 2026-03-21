@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import logging
 import os
+import json
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import requests
@@ -26,6 +29,26 @@ logger = logging.getLogger(__name__)
 _PL_API_URL = os.getenv("PL_INTERNAL_API_URL", "http://localhost:9090")
 _PL_API_KEY = os.getenv("PL_INTERNAL_API_KEY", "")
 _TIMEOUT    = int(os.getenv("PL_INTERNAL_TIMEOUT", "10"))
+
+
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "0398bc",
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[2] / "debug-0398bc.log"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 
 class PreLendClient:
@@ -40,8 +63,31 @@ class PreLendClient:
         self._base    = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
+        # region agent log
+        _agent_log(
+            "H7",
+            "Orchestrator/integrations/prelend_client.py:__init__",
+            "PreLendClient initialized",
+            {
+                "baseUrl": self._base,
+                "apiKeyPresent": bool(api_key),
+                "apiKeyLength": len(api_key or ""),
+            },
+        )
+        # endregion
         if api_key:
             self._session.headers["X-API-Key"] = api_key
+        # region agent log
+        _agent_log(
+            "H7",
+            "Orchestrator/integrations/prelend_client.py:__init__",
+            "Session header prepared",
+            {
+                "hasXApiKeyHeader": "X-API-Key" in self._session.headers,
+                "headerLength": len(self._session.headers.get("X-API-Key", "")),
+            },
+        )
+        # endregion
 
     # ── Health ─────────────────────────────────────────────────────────────────
 
@@ -144,11 +190,31 @@ class PreLendClient:
 
     def _get(self, path: str, params: Dict = None) -> Any:
         try:
+            # region agent log
+            _agent_log(
+                "H8",
+                "Orchestrator/integrations/prelend_client.py:_get",
+                "Sending GET to PreLend API",
+                {
+                    "path": path,
+                    "baseUrl": self._base,
+                    "hasXApiKeyHeader": bool(self._session.headers.get("X-API-Key")),
+                },
+            )
+            # endregion
             r = self._session.get(
                 f"{self._base}{path}",
                 params=params,
                 timeout=self._timeout,
             )
+            # region agent log
+            _agent_log(
+                "H8",
+                "Orchestrator/integrations/prelend_client.py:_get",
+                "Received response from PreLend API",
+                {"path": path, "statusCode": r.status_code},
+            )
+            # endregion
             r.raise_for_status()
             return r.json()
         except requests.ConnectionError:

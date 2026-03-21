@@ -120,3 +120,4 @@ dist/
 build/
 *.egg-info/
 *.egg
+.env

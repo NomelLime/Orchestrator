@@ -103,6 +103,17 @@ class PreLendClient:
         data = self.get_config("splits")
         return data if isinstance(data, list) else []
 
+    def get_templates(self) -> Dict[str, List[str]]:
+        data = self._get("/templates")
+        if not isinstance(data, dict):
+            return {"offers": [], "cloaked": []}
+        offers = data.get("offers", [])
+        cloaked = data.get("cloaked", [])
+        return {
+            "offers": offers if isinstance(offers, list) else [],
+            "cloaked": cloaked if isinstance(cloaked, list) else [],
+        }
+
     def write_config(
         self, name: str, data: Any, source: str = "orchestrator"
     ) -> bool:
@@ -173,8 +184,45 @@ class PreLendClient:
                 params=params,
                 timeout=self._timeout,
             )
+            if r.ok:
+                return True
+
+            # Backward compatibility for old Internal API versions:
+            # some deployments expect payload wrapped as {"body": ...}.
+            if r.status_code == 422 and json_body is not None:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                detail = data.get("detail", "")
+                need_wrapped_body = False
+                if isinstance(detail, list):
+                    for item in detail:
+                        if not isinstance(item, dict):
+                            continue
+                        loc = item.get("loc", [])
+                        msg = item.get("msg", "")
+                        if isinstance(loc, list) and loc[:2] == ["body", "body"] and msg == "Field required":
+                            need_wrapped_body = True
+                            break
+                else:
+                    detail_text = str(detail)
+                    if "body" in detail_text and "Field required" in detail_text:
+                        need_wrapped_body = True
+
+                if need_wrapped_body:
+                    r2 = self._session.put(
+                        f"{self._base}{path}",
+                        json={"body": json_body},
+                        params=params,
+                        timeout=self._timeout,
+                    )
+                    if r2.ok:
+                        logger.info("[PreLendClient] PUT %s: fallback payload format applied", path)
+                        return True
+
             r.raise_for_status()
-            return True
+            return False
         except requests.ConnectionError:
             logger.error(
                 "[PreLendClient] Нет связи с PreLend API при PUT %s. "

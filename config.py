@@ -176,3 +176,10 @@ SP_PIPELINE_PID_FILE = BASE_DIR / "data" / ".sp_pipeline.pid"
 # DRY_RUN=True → Orchestrator генерирует планы, но не применяет ничего.
 # Используй при первом запуске, чтобы убедиться что логика корректна.
 DRY_RUN = os.getenv("ORC_DRY_RUN", "false").lower() == "true"
+
+# True → всегда вызывать LLM для плана (отключить эвристику п.6)
+PLAN_HEURISTICS_DISABLED = os.getenv("ORC_DISABLE_PLAN_HEURISTICS", "false").lower() == "true"
+
+# Telegram: при cycle_outcome != ok (см. modules/cycle_semantics.py)
+# ORC_ALERT_ON_BAD_OUTCOME=false — отключить алерты
+# ORC_ALERT_OUTCOME_ALLOWLIST=paused,cancelled — не слать при этих кодах (пустая строка = алерт на любой не-ok)

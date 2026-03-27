@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, TypedDict
 
 import config
 from db.commands import (
@@ -21,6 +21,9 @@ from db.commands import (
     set_policy, get_all_policies,
 )
 from integrations.ollama_client import call_llm
+from langgraph.graph import END, StateGraph
+from modules import cycle_semantics as cs
+from modules import orchestrator_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,18 @@ _PARSE_CMD_PROMPT = """Ты — парсер команд оператора с�
 """
 
 
-def process_pending_commands() -> int:
+class PolicyCommandState(TypedDict, total=False):
+    command_id: int
+    raw_text: str
+    trace_id: str
+    parsed: Dict[str, Any]
+    rejected: bool
+    reject_reason: str
+    applied: bool
+    outcome: str
+
+
+def process_pending_commands(trace_id: str = "") -> int:
     """
     Обрабатывает все pending-команды от оператора.
     Каждую команду:
@@ -59,6 +73,8 @@ def process_pending_commands() -> int:
         2. Записывает parsed_json в БД
         3. Применяет к политикам/зонам
         4. Помечает как applied/rejected
+
+    trace_id — корреляция с циклом Orchestrator (телеметрия policy_command_trace.jsonl).
     """
     commands = get_pending_commands()
     if not commands:
@@ -67,36 +83,138 @@ def process_pending_commands() -> int:
     from modules.zones import process_zone_commands
     applied = 0
 
+    graph = _get_policy_command_graph()
     for cmd in commands:
-        raw_text   = cmd["raw_text"]
-        command_id = cmd["id"]
-
-        logger.info("[Policies] Обработка команды #%d: %s", command_id, raw_text[:60])
-
-        # Интерпретируем через LLM
-        parsed = _parse_command_with_llm(raw_text)
-        if not parsed:
-            logger.warning("[Policies] Не удалось интерпретировать команду #%d", command_id)
-            mark_command_rejected(command_id, "LLM не смогла интерпретировать")
-            continue
-
-        # Обновляем parsed_json в БД
-        from db.connection import get_db
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE operator_commands SET parsed_json = ?, command_type = ? WHERE id = ?",
-                (json.dumps(parsed, ensure_ascii=False), parsed.get("type"), command_id)
-            )
-
-        # Применяем
-        _apply_parsed_command(parsed, command_id)
-        mark_command_applied(command_id)
-        applied += 1
+        result = graph.invoke(
+            {
+                "command_id": int(cmd["id"]),
+                "raw_text": str(cmd["raw_text"]),
+                "trace_id": trace_id,
+            }
+        )
+        if result.get("applied"):
+            applied += 1
 
     # После обновления parsed_json — запускаем обработчик зон
     process_zone_commands()
 
     return applied
+
+
+def _node_parse(state: PolicyCommandState) -> PolicyCommandState:
+    command_id = state["command_id"]
+    raw_text = (state.get("raw_text") or "").strip()
+    tid = state.get("trace_id") or ""
+    logger.info("[Policies] Обработка команды #%d: %s", command_id, raw_text[:60])
+
+    if not raw_text:
+        orchestrator_telemetry.append_policy_command_event(
+            tid, command_id, "parse", cs.NEEDS_CLARIFICATION, {"reason": "empty_message"}
+        )
+        return {
+            "rejected": True,
+            "reject_reason": "Пустое сообщение",
+            "outcome": cs.NEEDS_CLARIFICATION,
+        }
+
+    parsed = _parse_command_with_llm(raw_text)
+    if not parsed:
+        logger.warning("[Policies] Не удалось интерпретировать команду #%d", command_id)
+        orchestrator_telemetry.append_policy_command_event(
+            tid, command_id, "parse", cs.LLM_EMPTY, {"reason": "llm_unparseable"}
+        )
+        return {
+            "rejected": True,
+            "reject_reason": "LLM не смогла интерпретировать",
+            "outcome": cs.LLM_EMPTY,
+        }
+
+    orchestrator_telemetry.append_policy_command_event(
+        tid,
+        command_id,
+        "parse",
+        cs.OK,
+        {"type": parsed.get("type"), "action": parsed.get("action")},
+    )
+    return {"parsed": parsed, "rejected": False, "outcome": cs.OK}
+
+
+def _node_reject(state: PolicyCommandState) -> PolicyCommandState:
+    mark_command_rejected(state["command_id"], state.get("reject_reason") or "Ошибка парсинга")
+    tid = state.get("trace_id") or ""
+    oc = state.get("outcome") or cs.POLICY_GAP
+    orchestrator_telemetry.append_policy_command_event(
+        tid,
+        state["command_id"],
+        "rejected",
+        oc,
+        {"reason": state.get("reject_reason")},
+    )
+    return {"applied": False}
+
+
+def _node_persist_parsed(state: PolicyCommandState) -> PolicyCommandState:
+    parsed = state["parsed"]
+    from db.connection import get_db
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE operator_commands SET parsed_json = ?, command_type = ? WHERE id = ?",
+            (json.dumps(parsed, ensure_ascii=False), parsed.get("type"), state["command_id"]),
+        )
+    return {}
+
+
+def _node_apply(state: PolicyCommandState) -> PolicyCommandState:
+    _apply_parsed_command(state["parsed"], state["command_id"])
+    return {}
+
+
+def _node_mark_applied(state: PolicyCommandState) -> PolicyCommandState:
+    mark_command_applied(state["command_id"])
+    tid = state.get("trace_id") or ""
+    orchestrator_telemetry.append_policy_command_event(
+        tid,
+        state["command_id"],
+        "applied",
+        cs.OK,
+        {"type": (state.get("parsed") or {}).get("type")},
+    )
+    return {"applied": True}
+
+
+def _route_after_parse(state: PolicyCommandState) -> str:
+    return "reject" if state.get("rejected") else "persist"
+
+
+def _build_policy_command_graph():
+    graph = StateGraph(PolicyCommandState)
+    graph.add_node("parse", _node_parse)
+    graph.add_node("reject", _node_reject)
+    graph.add_node("persist", _node_persist_parsed)
+    graph.add_node("apply", _node_apply)
+    graph.add_node("mark_applied", _node_mark_applied)
+    graph.set_entry_point("parse")
+    graph.add_conditional_edges(
+        "parse",
+        _route_after_parse,
+        {"reject": "reject", "persist": "persist"},
+    )
+    graph.add_edge("reject", END)
+    graph.add_edge("persist", "apply")
+    graph.add_edge("apply", "mark_applied")
+    graph.add_edge("mark_applied", END)
+    return graph.compile()
+
+
+_POLICY_COMMAND_GRAPH = None
+
+
+def _get_policy_command_graph():
+    global _POLICY_COMMAND_GRAPH
+    if _POLICY_COMMAND_GRAPH is None:
+        _POLICY_COMMAND_GRAPH = _build_policy_command_graph()
+    return _POLICY_COMMAND_GRAPH
 
 
 def _parse_command_with_llm(raw_text: str) -> Optional[Dict]:

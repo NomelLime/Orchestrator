@@ -35,12 +35,10 @@ import portalocker
 import config
 import startup_check
 from db.connection   import init_db
-from modules         import tracking, zones as zones_module, evolution, policies
-from modules         import config_enforcer, code_evolver, evaluator, supply_tracker, sp_runner
+from modules         import orchestrator_graph
 from commander       import notifier
 from commander       import telegram_bot
-from db.experiences  import mark_plan_applied, mark_plan_failed
-from db.commands     import get_policy, cleanup_expired_policies
+from db.commands     import get_policy
 
 # ─────────────────────────────────────────────────────────────────────────────
 # События для межпоточного управления циклом
@@ -85,208 +83,14 @@ logger = logging.getLogger("Orchestrator")
 # Главный цикл
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _cleanup_old_data() -> None:
-    """
-    Удаляет устаревшие записи из БД порциями. Вызывается раз в сутки.
-
-    Батчевое удаление по 500 строк — не блокирует SQLite WAL надолго
-    при накоплении больших таблиц (10K+ строк за период).
-    """
-    from db.connection import get_db as _get_db
-
-    # (table, age_expr, extra_where)
-    # Имена таблиц — hardcoded, не от пользователя — SQL injection невозможен
-    _tables = [
-        ("metrics_snapshots", "90 days",  ""),
-        ("notifications",     "30 days",  ""),
-        ("evolution_plans",   "180 days", "AND status != 'applied'"),
-    ]
-
-    total_deleted = 0
-    try:
-        with _get_db() as conn:
-            for table, age, extra in _tables:
-                deleted_table = 0
-                # Удаляем порциями по 500 строк — не блокируем WAL надолго
-                while True:
-                    cur = conn.execute(
-                        f"DELETE FROM {table} WHERE rowid IN "
-                        f"(SELECT rowid FROM {table} "
-                        f" WHERE created_at < datetime('now', '-{age}') {extra} "
-                        f" LIMIT 500)"
-                    )
-                    batch = cur.rowcount
-                    deleted_table += batch
-                    if batch < 500:
-                        break  # все устаревшие удалены
-                if deleted_table:
-                    logger.info("[Cleanup] %s: удалено %d строк", table, deleted_table)
-                total_deleted += deleted_table
-            conn.commit()
-        if total_deleted:
-            logger.info("[Cleanup] Всего удалено: %d строк", total_deleted)
-    except Exception as exc:
-        logger.warning("[Cleanup] Ошибка очистки: %s", exc)
-
-
 def run_cycle(cycle_num: int = 0) -> None:
-    """Один полный цикл Orchestrator. cycle_num используется для throttle-логики."""
+    """Один полный цикл Orchestrator через LangGraph."""
     cycle_start = datetime.now()
     logger.info("=" * 60)
     logger.info("Цикл #%d начат: %s | DRY_RUN=%s", cycle_num, cycle_start.isoformat(), config.DRY_RUN)
 
     try:
-        # ── Шаг 0: Ретроспективная оценка изменений (24h delayed) ────────────
-        evaluated = evaluator.evaluate_pending_changes()
-        if evaluated:
-            logger.info("[0/9] Ретроспективная оценка: %d изменений оценено", evaluated)
-
-        # ── Шаг 0.5: Очистка истекших политик + суточная уборка БД ──────────
-        cleanup_expired_policies()
-        cycles_per_day = max(1, 24 // max(config.CYCLE_INTERVAL_HOURS, 1))
-        if cycle_num % cycles_per_day == 0:
-            _cleanup_old_data()
-
-        # ── Шаг 1: Деградация зон ────────────────────────────────────────────
-        logger.info("[1/9] Деградация зон...")
-        zones_module.run_decay()
-
-        # ── Шаг 2: Команды оператора ─────────────────────────────────────────
-        logger.info("[2/9] Обработка команд оператора...")
-        n_commands = policies.process_pending_commands()
-        if n_commands:
-            logger.info("  Обработано команд: %d", n_commands)
-
-        # ── Проверка паузы эволюции ───────────────────────────────────────────
-        if get_policy("pause_evolution"):
-            logger.info("[Orchestrator] Эволюция на паузе (команда оператора) — цикл пропущен")
-            return
-
-        # ── Шаг 3: Сбор метрик ───────────────────────────────────────────────
-        logger.info("[3/9] Сбор метрик...")
-        metrics_data = tracking.collect_all_and_save()
-
-        sp = metrics_data["shorts_project"]
-        pl = metrics_data["prelend"]
-        logger.info(
-            "  SP: views=%d, bans=%d | PreLend: clicks=%d, CR=%s",
-            sp["total_views"], sp["ban_count"],
-            pl["total_clicks"], f"{pl['cr']:.4f}" if pl.get("cr") else "н/д",
-        )
-
-        # ── Шаг 3.5: Краш-луп детектор ───────────────────────────────────────
-        reverted = code_evolver.check_and_revert_on_crash()
-
-        if reverted:
-            logger.warning("[4/9] Краш-луп: автооткат выполнен — пропускаем генерацию плана")
-            return
-
-        # ── Шаг 3.6: SP Pipeline manager ─────────────────────────────────────
-        logger.info("[5/9] SP Pipeline manager...")
-        sp_runner.manage_sp_pipeline(metrics_data)
-
-        # ── Шаг 3.7: Мониторинг прокси (раз в N циклов) ──────────────────────
-        if cycle_num % config.SUPPLY_CHECK_EVERY_N_CYCLES == 0:
-            logger.info("[6/9] Проверка прокси/баланса...")
-            supply_requests = supply_tracker.check_supply(sp)
-            if supply_requests:
-                logger.info("  Отправлено запросов оператору: %d", supply_requests)
-
-        # ── Шаг 4: Генерация плана ───────────────────────────────────────────
-        logger.info("[7/9] Генерация плана эволюции (LLM)...")
-        plan = evolution.generate_plan(metrics_data)
-
-        if not plan:
-            logger.warning("[Orchestrator] LLM не вернула план — цикл завершён без изменений")
-            notifier.log_notification(
-                "LLM не вернула план эволюции", level="warning", category="plan"
-            )
-            return
-
-        plan_id = plan["_plan_id"]
-        logger.info("  План #%d: %s (риск: %s)", plan_id, plan.get("summary", "")[:60],
-                    plan.get("risk_assessment", {}).get("estimated_risk", "?"))
-
-        # Отправляем план в Telegram (не ждём подтверждения — применяем автоматически)
-        notifier.send_message(
-            f"📋 <b>Orchestrator — Новый план #{plan_id}</b>\n"
-            f"Риск: {plan.get('risk_assessment', {}).get('estimated_risk', '?')}\n\n"
-            f"{plan.get('summary', '')}",
-        )
-        notifier.log_notification(
-            f"Сгенерирован план #{plan_id}: {plan.get('summary', '')[:80]}",
-            category="plan"
-        )
-
-        if config.DRY_RUN:
-            logger.info("[Orchestrator] DRY_RUN — план не применяется")
-            return
-
-        # Пауза перед применением (если задана) — прерываемая через /freeze или /cancel_plan
-        if config.PLAN_APPLY_DELAY_SEC > 0:
-            delay_min = config.PLAN_APPLY_DELAY_SEC // 60
-            notifier.send_message(
-                f"⏳ <b>Применение плана #{plan_id} через {delay_min} мин.</b>\n"
-                f"Отправьте /freeze или /cancel_plan чтобы отменить."
-            )
-            logger.info("  Ожидание %d сек перед применением...", config.PLAN_APPLY_DELAY_SEC)
-            _cancel_plan.clear()
-            cancelled = _cancel_plan.wait(timeout=config.PLAN_APPLY_DELAY_SEC)
-
-            # После ожидания — явная проверка отмены
-            if cancelled or get_policy("pause_evolution"):
-                mark_plan_failed(plan_id)
-                notifier.send_message(f"🛑 <b>План #{plan_id} отменён оператором</b>")
-                logger.warning("[Orchestrator] План #%d отменён во время ожидания", plan_id)
-                return
-
-        # ── Шаг 5: Применение конфиг-изменений ───────────────────────────────
-        logger.info("[8/9] Применение config_changes...")
-        cfg_ok, cfg_fail = config_enforcer.apply_config_changes(plan, plan_id)
-        logger.info("  Конфиги: успешно=%d, ошибок=%d", cfg_ok, cfg_fail)
-        if cfg_ok or cfg_fail:
-            notifier.log_notification(
-                f"Config changes план #{plan_id}: +{cfg_ok} ошибок:{cfg_fail}",
-                category="patch",
-                level="info" if cfg_fail == 0 else "warning"
-            )
-
-        # ── Шаг 6: Патчи кода (двухшаговый: одобрение → применение) ─────────
-        logger.info("[8/9] Code patches (Zone 4)...")
-
-        # 6a. Применяем ранее одобренные патчи (из прошлых циклов)
-        code_ok, code_fail = code_evolver.apply_approved_patches()
-        if code_ok or code_fail:
-            logger.info("  Одобренные патчи применены: успешно=%d, откатов=%d", code_ok, code_fail)
-            notifier.log_notification(
-                f"Code patches применены: +{code_ok} откатов:{code_fail}",
-                category="patch",
-                level="info" if code_fail == 0 else "warning"
-            )
-
-        # 6b. Ставим в очередь новые патчи из текущего плана → уведомление в Telegram
-        queued = code_evolver.queue_code_patches(plan, plan_id)
-        if queued:
-            logger.info("  Новых патчей поставлено в очередь: %d (ожидают /approve_N)", queued)
-            notifier.log_notification(
-                f"Plan #{plan_id}: {queued} патч(ей) ожидают одобрения в Telegram",
-                category="patch",
-                level="info"
-            )
-
-        # Помечаем план: считаем config_changes + применённые code_patches
-        # queued-патчи не считаются применёнными — они ожидают одобрения
-        total_ok   = cfg_ok + code_ok
-        total_fail = cfg_fail + code_fail
-        if total_ok > 0:
-            mark_plan_applied(plan_id)
-        elif total_fail > 0:
-            mark_plan_failed(plan_id)
-        # Если только queued (без cfg_ok/code_ok) — план остаётся pending до применения
-
-        # ── Шаг 7: Суточный дайджест ─────────────────────────────────────────
-        logger.info("[9/9] Проверка суточного дайджеста...")
-        notifier.send_daily_digest_if_due()
+        orchestrator_graph.run_cycle_graph(cycle_num=cycle_num)
 
     except Exception as exc:
         logger.error("[Orchestrator] КРИТИЧЕСКАЯ ОШИБКА в цикле: %s", exc, exc_info=True)

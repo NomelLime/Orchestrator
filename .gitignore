@@ -45,6 +45,9 @@ logs/
 *.log.*
 data/orchestrator.log
 data/pipeline.log
+# Подробная траектория шагов (JSONL), может разрастаться
+data/orchestrator_trace.jsonl
+data/policy_command_trace.jsonl
 
 
 # ── PYTHON CACHE ──────────────────────────────────────────────────────────────

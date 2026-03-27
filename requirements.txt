@@ -3,5 +3,6 @@ requests>=2.31
 ollama>=0.1.7
 langgraph>=0.2
 portalocker>=2.8        # кросс-платформенные файловые блокировки (Windows + Linux)
+-e ../shared_gpu_lock   # GPUResourceManager + общий .gpu_lock с ShortsProject
 python-dotenv>=1.0
 pytest>=7.0

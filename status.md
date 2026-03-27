@@ -585,3 +585,11 @@ LLM-план с scope="visual", new_value="cinematic"
 | R12-6 | ✅ | Orchestrator | `modules/evolution.py` | FIX#V3-5 верифицирован: `_safe_finances_block()` уже применён |
 
 **Статус тестов после ревью:** `pytest tests/` (наши модули) → **118/118** ✅
+
+### Сессия 12 (27.03.2026) — `prelend_client`: шаблоны и совместимость PUT
+
+| Файл | Изменение |
+|------|-----------|
+| `integrations/prelend_client.py` | Метод **`get_templates()`** → `GET /templates` (списки `offers` / `cloaked`). В **`_put`**: при ответе **422** с телом про обязательное поле `body` — повтор с обёрткой `{"body": ...}` (legacy-клиенты); разбор `detail` как list (OpenAPI 3). |
+
+**Зависимость:** на VPS должен быть задеплоен PreLend Internal API с эндпоинтом `/templates` и исправленным `PUT /config/{name}` (см. `PreLend/status.md`, сессия 16).

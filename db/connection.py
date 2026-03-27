@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 
+def _migrate_applied_changes_commit_hash(conn: sqlite3.Connection) -> None:
+    """Добавляет колонку commit_hash в applied_changes для существующих БД."""
+    rows = conn.execute("PRAGMA table_info(applied_changes)").fetchall()
+    cols = {r[1] for r in rows}
+    if "commit_hash" not in cols:
+        conn.execute("ALTER TABLE applied_changes ADD COLUMN commit_hash TEXT")
+
+
 def init_db() -> None:
     """
     Создаёт БД и применяет schema.sql если таблицы ещё не существуют.
@@ -37,6 +45,7 @@ def init_db() -> None:
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         # Выполняем весь schema.sql (CREATE TABLE IF NOT EXISTS — идемпотентно)
         conn.executescript(schema_sql)
+        _migrate_applied_changes_commit_hash(conn)
         conn.commit()
         logger.info("[DB] Инициализирована: %s", config.DB_PATH)
     finally:

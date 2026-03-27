@@ -78,6 +78,7 @@ def save_applied_change(
     test_output: Optional[str] = None,
     rolled_back: bool = False,
     rollback_reason: Optional[str] = None,
+    commit_hash: Optional[str] = None,
 ) -> int:
     """Сохраняет результат применения одного изменения из плана. Возвращает id."""
     with get_db() as conn:
@@ -86,8 +87,8 @@ def save_applied_change(
                 evolution_plan_id, change_type, repo, zone, description,
                 file_path, old_value_json, new_value_json,
                 test_status, test_output,
-                rolled_back, rollback_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rolled_back, rollback_reason, commit_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             plan_id, change_type, repo, zone, description,
             file_path,
@@ -97,6 +98,7 @@ def save_applied_change(
             (test_output or "")[:2000],  # не храним бесконечные логи
             int(rolled_back),
             rollback_reason,
+            commit_hash,
         ))
         change_id = cursor.lastrowid
 

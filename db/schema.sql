@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS applied_changes (
     test_output         TEXT,               -- вывод pytest (первые 2000 символов)
     rolled_back         INTEGER DEFAULT 0,  -- 0/1 — был ли откат
     rollback_reason     TEXT,               -- причина отката
+    commit_hash         TEXT,               -- полный git SHA после code_patch (для точного отката)
     -- Влияние на метрики (заполняется позже, когда накопится статистика)
     metric_impact_json  TEXT                -- {"views_delta_pct": 5.2, ...}
 );

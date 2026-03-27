@@ -275,6 +275,8 @@ def _apply_approved_patch(patch: Dict) -> bool:
                 message   = f"[Orchestrator/CodeEvolver] {goal[:72]}",
             )
 
+            chash = git_tools.get_head_commit_full_hash(config.SHORTS_PROJECT_DIR) if config.GIT_AUTOCOMMIT else ""
+
             save_applied_change(
                 plan_id     = plan_id,
                 change_type = "code_patch",
@@ -285,6 +287,7 @@ def _apply_approved_patch(patch: Dict) -> bool:
                 test_status = "passed",
                 test_output = test_output[:2000],
                 rolled_back = False,
+                commit_hash = chash or None,
             )
 
             mark_patch_applied(patch_id, test_output[:500])
@@ -474,7 +477,17 @@ def _mark_last_patch_reverted(crash_agents: list, commit_hash: str = "") -> None
         with get_db() as conn:
             row = None
             if commit_hash:
-                # Ищем по коротким 8 символам хэша в description
+                row = conn.execute("""
+                    SELECT id FROM applied_changes
+                    WHERE rolled_back = 0 AND change_type = 'code_patch'
+                      AND (
+                        commit_hash = ?
+                        OR (commit_hash IS NOT NULL AND commit_hash LIKE ? || '%')
+                      )
+                    ORDER BY applied_at DESC LIMIT 1
+                """, (commit_hash, commit_hash)).fetchone()
+
+            if not row and commit_hash:
                 row = conn.execute("""
                     SELECT id FROM applied_changes
                     WHERE rolled_back = 0 AND description LIKE ?
@@ -482,7 +495,6 @@ def _mark_last_patch_reverted(crash_agents: list, commit_hash: str = "") -> None
                 """, (f"%{commit_hash[:8]}%",)).fetchone()
 
             if not row:
-                # Fallback: последний code_patch
                 row = conn.execute("""
                     SELECT id FROM applied_changes
                     WHERE change_type = 'code_patch' AND rolled_back = 0

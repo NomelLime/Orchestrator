@@ -114,6 +114,12 @@ def get_last_commit_hash(repo_dir: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def get_head_commit_full_hash(repo_dir: Path) -> str:
+    """Полный SHA последнего коммита (для записи в applied_changes)."""
+    result = _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def find_last_orc_commit(repo_dir: Path) -> str:
     """
     Ищет хэш последнего коммита с меткой [Orchestrator...] в SP-репозитории.

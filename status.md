@@ -593,3 +593,17 @@ LLM-план с scope="visual", new_value="cinematic"
 | `integrations/prelend_client.py` | Метод **`get_templates()`** → `GET /templates` (списки `offers` / `cloaked`). В **`_put`**: при ответе **422** с телом про обязательное поле `body` — повтор с обёрткой `{"body": ...}` (legacy-клиенты); разбор `detail` как list (OpenAPI 3). |
 
 **Зависимость:** на VPS должен быть задеплоен PreLend Internal API с эндпоинтом `/templates` и исправленным `PUT /config/{name}` (см. `PreLend/status.md`, сессия 16).
+
+### Сессия 13 (27.03.2026) — LangGraph: семантика цикла, телеметрия, эвристики плана, политики, алерты
+
+| Область | Изменение |
+|---------|-----------|
+| **`modules/cycle_semantics.py`** (NEW) | Коды исхода цикла (`ok`, `transport_failure`, `incomplete_evidence`, `llm_empty`, `stuck_loop`, `cancelled`, `paused`, `execution_mismatch`, `apply_not_verified`, `error`, …) и **`merge_outcomes()`** по приоритету. |
+| **`modules/plan_heuristics.py`** (NEW) | Эвристика **до** вызова LLM: если нет `ShortsProject/data/analytics.json` **и** PreLend API недоступен → план без LLM, исход `incomplete_evidence`. Отключение: **`ORC_DISABLE_PLAN_HEURISTICS=true`** (`config.PLAN_HEURISTICS_DISABLED`). |
+| **`modules/orchestrator_telemetry.py`** | В JSON: `cycle_outcome`, `cycle_summary`, `node_outcomes`. **`mark_step(..., node_outcome=, detail=)`** — детали в **`data/orchestrator_trace.jsonl`**. Отдельно **`append_policy_command_event()`** → **`data/policy_command_trace.jsonl`**. Ротация JSONL: **`ORC_TRACE_MAX_BYTES`**, **`ORC_TRACE_KEEP_TAIL_LINES`**. |
+| **`modules/orchestrator_graph.py`** | State `outcomes[]`; узлы накапливают коды; итог **`merge_outcomes`** + **`record_cycle_summary` / `end_cycle`**. **`_notify_outcome_if_needed`**: Telegram при итоге ≠ `ok` (отключается **`ORC_ALERT_ON_BAD_OUTCOME`**; исключения **`ORC_ALERT_OUTCOME_ALLOWLIST`** по умолчанию `paused,cancelled`). При исключении в цикле — отдельное TG-сообщение. |
+| **`modules/policies.py`** | **`process_pending_commands(trace_id)`** — корреляция с циклом. Пустой текст → `needs_clarification` без LLM; события в `policy_command_trace.jsonl` (стадии parse / rejected / applied). |
+| **`config.py`** | Комментарии к `PLAN_HEURISTICS_DISABLED` и переменным алертов по итогу цикла. |
+| **Тесты** | `tests/test_cycle_semantics.py`; pytest suite зелёный. |
+
+**ContentHub:** дашборд показывает `cycle_outcome` / `cycle_summary` / `node_outcomes`; вкладка **«Команды ОР»** и `GET /api/operator-commands/trace` читают `policy_command_trace.jsonl` (см. `ContentHub/status.md`).

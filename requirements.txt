@@ -5,4 +5,5 @@ langgraph>=0.2
 portalocker>=2.8        # кросс-платформенные файловые блокировки (Windows + Linux)
 -e ../shared_gpu_lock   # GPUResourceManager + общий .gpu_lock с ShortsProject
 python-dotenv>=1.0
+python-json-logger>=2.0.7
 pytest>=7.0

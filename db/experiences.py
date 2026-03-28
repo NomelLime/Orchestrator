@@ -243,13 +243,42 @@ def save_plan_quality_score(
         return cursor.lastrowid
 
 
+def update_plan_quality_llm_judge(row_id: int, score: int, reasoning: str) -> None:
+    """Записывает оценку LLM-as-judge в строку plan_quality_scores."""
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE plan_quality_scores
+            SET llm_judge_score = ?, llm_judge_reasoning = ?
+            WHERE id = ?
+            """,
+            (score, (reasoning or "")[:500], row_id),
+        )
+
+
+def get_avg_llm_judge_stats() -> tuple[Optional[float], int]:
+    """Средний llm_judge_score и число оценок (для промпта evolution)."""
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT AVG(llm_judge_score) AS av, COUNT(*) AS cnt
+            FROM plan_quality_scores
+            WHERE llm_judge_score IS NOT NULL
+            """
+        ).fetchone()
+    if not row or row["cnt"] == 0:
+        return None, 0
+    return float(row["av"]), int(row["cnt"])
+
+
 def get_recent_plan_scores(limit: int = 5) -> List[Dict]:
     """Возвращает последние оценки качества планов для LLM-промпта."""
     with get_db() as conn:
         rows = conn.execute("""
             SELECT pqs.plan_id, pqs.evaluated_at, pqs.views_delta_pct,
                    pqs.ctr_delta_pct, pqs.cr_delta_pct, pqs.ban_delta,
-                   pqs.overall_score, pqs.zones_affected
+                   pqs.overall_score, pqs.zones_affected,
+                   pqs.llm_judge_score, pqs.llm_judge_reasoning
             FROM plan_quality_scores pqs
             ORDER BY pqs.evaluated_at DESC
             LIMIT ?

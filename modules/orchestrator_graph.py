@@ -471,7 +471,11 @@ def _node_digest(state: OrchestratorState) -> OrchestratorState:
             node_outcome=cs.OK,
         )
     logger.info("[9/9] Проверка суточного дайджеста...")
-    notifier.send_daily_digest_if_due()
+    md = state.get("metrics_data") or {}
+    notifier.send_digest_with_analytics_card(
+        md.get("shorts_project"),
+        md.get("prelend"),
+    )
     return {}
 
 

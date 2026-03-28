@@ -9,6 +9,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Единый файл секретов монорепы: GitHub/.secrets.env, затем Orchestrator/.env
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _orc_dir = Path(__file__).resolve().parent
+    _load_dotenv(_orc_dir.parent / ".secrets.env", override=False)
+    _load_dotenv(_orc_dir / ".env", override=True)
+except ImportError:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Пути
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +123,10 @@ TELEGRAM_CHAT_ID    = os.getenv("ORC_TG_CHAT_ID", "")  # твой chat_id
 # Время ежедневной сводки (локальное время, HH:MM)
 DAILY_DIGEST_TIME   = os.getenv("ORC_DIGEST_TIME", "09:00")
 
+# ContentHub: POST /api/events (заголовок X-Internal-Events-Key = ключ из ContentHub)
+CONTENTHUB_URL        = os.getenv("ORC_CONTENTHUB_URL", "").rstrip("/")
+CONTENTHUB_EVENTS_KEY = os.getenv("ORC_CONTENTHUB_EVENTS_KEY", "")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Git
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +182,27 @@ SP_PIPELINE_MAX_DURATION_HOURS = int(os.getenv("ORC_SP_MAX_HOURS", "4"))
 
 # PID-файл для хранения PID между перезапусками Orchestrator
 SP_PIPELINE_PID_FILE = BASE_DIR / "data" / ".sp_pipeline.pid"
+
+# Поэтапный pipeline (run_pipeline.py --only)
+SP_STAGE_MAX_RETRIES = {
+    "search": 2,
+    "download": 2,
+    "processing": 1,
+    "distribute": 1,
+    "upload": 3,
+    "finalize": 1,
+}
+SP_STAGE_TIMEOUTS = {
+    "search": 600,
+    "download": 1800,
+    "processing": 7200,
+    "distribute": 300,
+    "upload": 3600,
+    "finalize": 600,
+}
+SP_SKIPPABLE_STAGES = {"search", "download"}
+SP_STAGE_BACKOFF_SEC = 60
+SP_PIPELINE_STAGES = ["search", "download", "processing", "distribute", "upload", "finalize"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Режим безопасности

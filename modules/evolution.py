@@ -13,13 +13,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import config
 from db.experiences import (
-    save_evolution_plan, get_rich_experience_context, get_failed_patterns,
+    save_evolution_plan,
+    get_rich_experience_context,
+    get_failed_patterns,
     get_recent_plan_scores,
+    get_avg_llm_judge_stats,
 )
 from db.zones       import get_all_zones
 from db.commands    import get_all_policies
@@ -64,6 +68,19 @@ def _safe_finances_block(finances: dict) -> str:
 logger = logging.getLogger(__name__)
 
 
+def _should_defer_llm() -> bool:
+    """True если ShortsProject в этапе с тяжёлой VL нагрузкой — отложить стратегический LLM."""
+    state_file = config.SHORTS_PROJECT_DIR / "data" / "pipeline_state.json"
+    try:
+        st = json.loads(state_file.read_text(encoding="utf-8"))
+        cur = st.get("current_stage")
+        if cur in ("processing", "search", "upload"):
+            return True
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Главная функция
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +95,10 @@ def generate_plan(metrics_data: Dict[str, Any]) -> Optional[Dict]:
     Returns:
         dict плана (в формате JSON-схемы из промпта) или None при ошибке.
     """
+    if _should_defer_llm():
+        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM на 5 мин")
+        time.sleep(300)
+
     prompt = _build_prompt(metrics_data)
     logger.info("[Evolution] Запрос к LLM (модель: %s)", config.OLLAMA_STRATEGY_MODEL)
 
@@ -177,6 +198,8 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
         quality_block = "\n=== КАЧЕСТВО ПОСЛЕДНИХ ПЛАНОВ (оценка через 24ч) ===\n"
         for s in recent_scores:
             line = f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
+            if s.get("llm_judge_score") is not None:
+                line += f", LLM={s['llm_judge_score']}/10"
             if s.get('views_delta_pct') is not None:
                 line += f", views={s['views_delta_pct']:+.1f}%"
             if s.get("ctr_delta_pct") is not None:
@@ -184,8 +207,19 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
             if s.get("cr_delta_pct") is not None:
                 line += f", CR={s['cr_delta_pct']:+.1f}%"
             quality_block += line + "\n"
+        avg_llm, n_llm = get_avg_llm_judge_stats()
+        if n_llm and avg_llm is not None:
+            quality_block += f"\n  Средний LLM-as-judge по прошлым планам: {avg_llm:.1f} (из {n_llm} оценок)\n"
+        else:
+            quality_block += "\n  Средний LLM-as-judge: N/A (пока нет оценок)\n"
     else:
         quality_block = ""
+        avg_llm, n_llm = get_avg_llm_judge_stats()
+        if n_llm and avg_llm is not None:
+            quality_block = (
+                "\n=== КАЧЕСТВО ПЛАНОВ (LLM-as-judge) ===\n"
+                f"  Средний score: {avg_llm:.1f} (из {n_llm} оценок)\n"
+            )
 
     # ── Рекомендации Strategist SP ────────────────────────────────────────────
     # Strategist уже проанализировал данные SP 6 часов назад — используем его

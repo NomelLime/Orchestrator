@@ -15,12 +15,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from db.connection  import get_db
-from db.experiences import update_metric_impact, save_plan_quality_score
+from db.experiences import (
+    update_metric_impact,
+    save_plan_quality_score,
+    update_plan_quality_llm_judge,
+)
 import config as _config
+from integrations.ollama_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +66,7 @@ def evaluate_pending_changes() -> int:
         else:
             logger.debug("[Evaluator] Нет снапшотов для оценки #%d", change["id"])
 
-    # Агрегируем дельты по плану → записываем plan_quality_scores
+    # Агрегируем дельты по плану → записываем plan_quality_scores + LLM-as-judge
     for plan_id, deltas in plan_deltas.items():
         _save_plan_quality(plan_id, deltas)
 
@@ -106,7 +112,7 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
     except Exception:
         pass
 
-    save_plan_quality_score(
+    row_id = save_plan_quality_score(
         plan_id        = plan_id,
         views_delta_pct= views_delta,
         ctr_delta_pct  = ctr_delta,
@@ -117,11 +123,98 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
         zones_affected = zones_affected,
     )
     logger.info("[Evaluator] plan_quality_scores для плана #%d: score=%.2f", plan_id, score)
+    _score_plan_quality_llm(plan_id, deltas, row_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Выборка необработанных изменений
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_llm_json_obj(raw: str) -> Optional[Dict[str, Any]]:
+    """Извлекает первый JSON-объект из ответа LLM."""
+    if not raw:
+        return None
+    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    start = clean.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escaped = False
+    for i, ch in enumerate(clean[start:], start):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(clean[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _score_plan_quality_llm(plan_id: int, deltas: list, pqs_row_id: int) -> None:
+    """LLM-as-judge: оценка плана по агрегированным дельтам метрик."""
+    merged: Dict[str, Any] = {}
+    for d in deltas:
+        if isinstance(d, dict):
+            merged.update(d)
+
+    with get_db() as conn:
+        plan = conn.execute(
+            "SELECT summary, risk_level FROM evolution_plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+    if not plan:
+        return
+
+    prompt = f"""Ты — эксперт по оценке решений в системе автоматизации.
+
+Был сгенерирован план:
+  Описание: {plan['summary'][:800]}
+  Уровень риска: {plan['risk_level']}
+
+Результат через 24 часа (дельта метрик):
+  {json.dumps(merged, ensure_ascii=False, indent=2)}
+
+Оцени качество этого плана от 1 до 10:
+  1-3: план навредил или не дал эффекта
+  4-6: нейтральный или минимальный эффект
+  7-8: хороший результат
+  9-10: отличный результат
+
+Верни ТОЛЬКО JSON: {{"score": N, "reasoning": "краткое обоснование"}}"""
+
+    raw = call_llm(model=_config.OLLAMA_STRATEGY_MODEL, prompt=prompt)
+    parsed = _parse_llm_json_obj(raw or "")
+    if not parsed or "score" not in parsed:
+        logger.debug("[Evaluator] LLM judge: нет валидного JSON для плана #%d", plan_id)
+        return
+
+    try:
+        score = max(1, min(10, int(parsed["score"])))
+    except (TypeError, ValueError):
+        return
+    reasoning = str(parsed.get("reasoning", ""))[:500]
+
+    try:
+        update_plan_quality_llm_judge(pqs_row_id, score, reasoning)
+        logger.info("[Evaluator] LLM judge план #%d: score=%d", plan_id, score)
+    except Exception as exc:
+        logger.warning("[Evaluator] LLM judge save: %s", exc)
+
 
 def _get_unevaluated_changes() -> List[Dict]:
     cutoff = _shift_hours(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), -_MIN_AGE_HOURS)

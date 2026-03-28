@@ -29,6 +29,16 @@ def _migrate_applied_changes_commit_hash(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE applied_changes ADD COLUMN commit_hash TEXT")
 
 
+def _migrate_plan_quality_llm_judge(conn: sqlite3.Connection) -> None:
+    """Колонки LLM-as-judge для plan_quality_scores."""
+    rows = conn.execute("PRAGMA table_info(plan_quality_scores)").fetchall()
+    cols = {r[1] for r in rows}
+    if "llm_judge_score" not in cols:
+        conn.execute("ALTER TABLE plan_quality_scores ADD COLUMN llm_judge_score INTEGER")
+    if "llm_judge_reasoning" not in cols:
+        conn.execute("ALTER TABLE plan_quality_scores ADD COLUMN llm_judge_reasoning TEXT")
+
+
 def init_db() -> None:
     """
     Создаёт БД и применяет schema.sql если таблицы ещё не существуют.
@@ -46,6 +56,7 @@ def init_db() -> None:
         # Выполняем весь schema.sql (CREATE TABLE IF NOT EXISTS — идемпотентно)
         conn.executescript(schema_sql)
         _migrate_applied_changes_commit_hash(conn)
+        _migrate_plan_quality_llm_judge(conn)
         conn.commit()
         logger.info("[DB] Инициализирована: %s", config.DB_PATH)
     finally:

@@ -25,6 +25,7 @@ main_orchestrator.py — Главный цикл Orchestrator.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -64,18 +65,44 @@ def trigger_force_cycle() -> None:
 # Логирование
 # ─────────────────────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level   = logging.INFO,
-    format  = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt = "%Y-%m-%d %H:%M:%S",
-    handlers = [
-        logging.StreamHandler(),
-        logging.FileHandler(
-            config.BASE_DIR / "data" / "orchestrator.log",
-            encoding = "utf-8",
-        ),
-    ]
-)
+_log_file = config.BASE_DIR / "data" / "orchestrator.log"
+if os.getenv("LOG_FORMAT", "").strip().lower() == "json":
+    try:
+        from pythonjsonlogger import jsonlogger
+
+        _root = logging.getLogger()
+        _root.handlers.clear()
+        _root.setLevel(logging.INFO)
+        _fmt = jsonlogger.JsonFormatter(
+            "%(asctime)s %(name)s %(levelname)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(_fmt)
+        _fh = logging.FileHandler(_log_file, encoding="utf-8")
+        _fh.setFormatter(_fmt)
+        _root.addHandler(_sh)
+        _root.addHandler(_fh)
+    except Exception:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(_log_file, encoding="utf-8"),
+            ],
+        )
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(_log_file, encoding="utf-8"),
+        ],
+    )
 logger = logging.getLogger("Orchestrator")
 
 

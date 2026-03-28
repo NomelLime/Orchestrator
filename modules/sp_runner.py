@@ -1,18 +1,5 @@
 """
-modules/sp_runner.py — Управление процессом ShortsProject pipeline.
-
-Orchestrator запускает run_pipeline.py как дочерний subprocess и управляет
-его жизненным циклом: запуск, мониторинг, детект зависания, алерт при краше.
-
-Триггеры запуска (проверяются каждый цикл Orchestrator):
-  1. upload_queue суммарно по всем аккаунтам < SP_PIPELINE_QUEUE_THRESHOLD
-  2. С последнего запуска прошло > SP_PIPELINE_INTERVAL_HOURS
-
-Состояние сохраняется в PID-файл — Orchestrator восстанавливает слежку
-за процессом после перезапуска.
-
-Экспортирует:
-    manage_sp_pipeline(metrics_data) → None  (вызывается из main_orchestrator)
+modules/sp_runner.py — Управление ShortsProject pipeline по этапам (--only + checkpoint).
 """
 
 from __future__ import annotations
@@ -25,25 +12,20 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import config
 from commander.notifier import send_message
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Внутреннее состояние (module-level singleton)
-# ─────────────────────────────────────────────────────────────────────────────
-
 _process: Optional[subprocess.Popen] = None
-_started_at: Optional[float] = None   # unix timestamp старта текущего процесса
-_last_finished_at: Optional[float] = None  # unix timestamp последнего завершения
+_started_at: Optional[float] = None
+_last_finished_at: Optional[float] = None
 
+_staged_active: bool = False
+_staged_started_at: Optional[float] = None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PID-файл: персистентность состояния между перезапусками Orchestrator
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _save_pid(pid: int, started_at: float) -> None:
     try:
@@ -74,7 +56,6 @@ def _clear_pid() -> None:
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Проверяет, живёт ли процесс с данным PID (кросс-платформенно)."""
     try:
         os.kill(pid, 0)
         return True
@@ -82,26 +63,23 @@ def _pid_is_alive(pid: int) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Управление процессом
-# ─────────────────────────────────────────────────────────────────────────────
-
 def is_running() -> bool:
-    """Возвращает True если SP pipeline процесс сейчас активен."""
     global _process, _started_at
 
-    if _process is not None:
-        return _process.poll() is None  # None = ещё работает
+    if _staged_active:
+        return True
 
-    # Восстановление после перезапуска Orchestrator: проверяем PID-файл
+    if _process is not None:
+        return _process.poll() is None
+
     saved = _load_pid()
     if saved and _pid_is_alive(saved["pid"]):
-        logger.info("[sp_runner] Восстановлен PID %d из файла (запущен %s)",
-                    saved["pid"],
-                    datetime.fromtimestamp(saved["started_at"]).strftime("%H:%M:%S"))
+        logger.info(
+            "[sp_runner] Восстановлен PID %d из файла (запущен %s)",
+            saved["pid"],
+            datetime.fromtimestamp(saved["started_at"]).strftime("%H:%M:%S"),
+        )
         _started_at = saved["started_at"]
-        # Не можем получить Popen объект по PID — просто следим через os.kill
-        # Используем флаг _started_at для детекта зависания
         return True
 
     _clear_pid()
@@ -109,7 +87,6 @@ def is_running() -> bool:
 
 
 def _count_queue_depth() -> int:
-    """Подсчитывает суммарное число видео в upload_queue по всем аккаунтам."""
     total = 0
     video_ext = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
     accounts_dir = config.SP_ACCOUNTS_DIR
@@ -126,23 +103,17 @@ def _count_queue_depth() -> int:
 
 
 def _should_trigger() -> tuple[bool, str]:
-    """
-    Определяет, нужно ли запускать pipeline прямо сейчас.
-    Возвращает (True, причина) или (False, причина).
-    """
     global _last_finished_at
 
     if is_running():
         return False, "уже запущен"
 
-    # Проверка минимального интервала
     if _last_finished_at is not None:
         elapsed_h = (time.time() - _last_finished_at) / 3600
         if elapsed_h < config.SP_PIPELINE_INTERVAL_HOURS:
             remaining = config.SP_PIPELINE_INTERVAL_HOURS - elapsed_h
             return False, f"слишком рано (ещё {remaining:.1f}ч)"
 
-    # Проверка глубины очереди
     depth = _count_queue_depth()
     if depth >= config.SP_PIPELINE_QUEUE_THRESHOLD:
         return False, f"очередь полная ({depth} видео ≥ порога {config.SP_PIPELINE_QUEUE_THRESHOLD})"
@@ -150,62 +121,76 @@ def _should_trigger() -> tuple[bool, str]:
     return True, f"очередь низкая ({depth} видео < порога {config.SP_PIPELINE_QUEUE_THRESHOLD})"
 
 
-def _start() -> bool:
-    """Запускает run_pipeline.py в директории ShortsProject. Возвращает True при успехе."""
-    global _process, _started_at
-
-    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
-    if not run_pipeline.exists():
-        logger.error("[sp_runner] run_pipeline.py не найден: %s", run_pipeline)
-        return False
-
-    log_path = config.SP_LOG_FILE
+def _read_pipeline_state() -> dict:
+    state_file = config.SHORTS_PROJECT_DIR / "data" / "pipeline_state.json"
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(str(log_path), "a", encoding="utf-8")
-        try:
-            _process = subprocess.Popen(
-                [sys.executable, str(run_pipeline)],
-                cwd=str(config.SHORTS_PROJECT_DIR),
-                stdout=log_file,
-                stderr=log_file,
-                # Новый процесс не привязан к Orchestrator — переживёт его перезапуск
-                close_fds=True,
-            )
-        finally:
-            # Закрываем Python-дескриптор — subprocess уже унаследовал fd
-            log_file.close()
-        _started_at = time.time()
-        _save_pid(_process.pid, _started_at)
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"stages": {}}
 
-        logger.info("[sp_runner] ShortsProject pipeline запущен (PID %d)", _process.pid)
-        send_message(
-            f"🚀 <b>ShortsProject Pipeline запущен</b>\n"
-            f"PID: {_process.pid}\n"
-            f"Лог: {log_path.name}"
+
+def _is_stage_done(state: dict, stage: str) -> bool:
+    st = (state.get("stages") or {}).get(stage, {})
+    return st.get("status") == "done"
+
+
+def _reset_pipeline_state_subprocess() -> None:
+    cmd = [
+        sys.executable,
+        "-c",
+        "from pipeline.pipeline_state import reset_state; reset_state()",
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            cwd=str(config.SHORTS_PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
-        return True
-
     except Exception as e:
-        logger.error("[sp_runner] Не удалось запустить pipeline: %s", e)
-        send_message(f"🔴 <b>SP Pipeline — ошибка запуска</b>\n{e}")
-        return False
+        logger.warning("[sp_runner] reset_state: %s", e)
+
+
+def _run_single_stage(stage: str, timeout: int) -> int:
+    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
+    cmd = [sys.executable, str(run_pipeline), "--only", stage]
+    try:
+        log_path = config.SP_LOG_FILE
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(log_path), "a", encoding="utf-8") as logf:
+            result = subprocess.run(
+                cmd,
+                timeout=timeout,
+                cwd=str(config.SHORTS_PROJECT_DIR),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        return int(result.returncode)
+    except subprocess.TimeoutExpired:
+        logger.error("[sp_runner] Stage %s timeout (%ds)", stage, timeout)
+        return -1
+    except Exception as e:
+        logger.error("[sp_runner] Stage %s error: %s", stage, e)
+        return -1
 
 
 def _check_hung() -> None:
-    """Проверяет, не завис ли pipeline. Если да — отправляет алерт."""
-    global _started_at
+    global _started_at, _staged_started_at
 
-    if _started_at is None:
+    t0 = _started_at or _staged_started_at
+    if t0 is None:
         return
 
-    elapsed_h = (time.time() - _started_at) / 3600
+    elapsed_h = (time.time() - t0) / 3600
     max_h = config.SP_PIPELINE_MAX_DURATION_HOURS
 
     if elapsed_h > max_h:
         logger.warning(
             "[sp_runner] Pipeline работает %.1fч (макс %dч) — возможно завис!",
-            elapsed_h, max_h,
+            elapsed_h,
+            max_h,
         )
         send_message(
             f"⚠️ <b>SP Pipeline — возможное зависание</b>\n"
@@ -214,8 +199,7 @@ def _check_hung() -> None:
         )
 
 
-def _on_finished(exit_code: int) -> None:
-    """Вызывается когда pipeline завершил работу."""
+def _on_finished_legacy(exit_code: int) -> None:
     global _last_finished_at, _process, _started_at
 
     _last_finished_at = time.time()
@@ -239,35 +223,92 @@ def _on_finished(exit_code: int) -> None:
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Публичный интерфейс
-# ─────────────────────────────────────────────────────────────────────────────
-
-def manage_sp_pipeline(metrics_data: dict = None) -> None:
+def manage_sp_pipeline(metrics_data: dict | None = None) -> Dict[str, Any]:
     """
-    Главная функция — вызывается из main_orchestrator каждый цикл.
-    Проверяет состояние текущего процесса и решает, нужен ли новый запуск.
-
-    Args:
-        metrics_data: данные из tracking (не используется пока, зарезервировано)
+    Запускает pipeline по этапам с retry и checkpoint.
     """
+    global _last_finished_at, _process, _started_at, _staged_active, _staged_started_at
+
     if not config.SP_PIPELINE_ENABLED:
-        return
+        return {"status": "disabled"}
 
-    # 1. Проверяем живой ли текущий процесс
     if _process is not None and not is_running():
         rc = _process.poll()
-        _on_finished(rc if rc is not None else -1)
+        _on_finished_legacy(rc if rc is not None else -1)
 
-    # 2. Детект зависания
     if is_running():
         _check_hung()
         logger.debug("[sp_runner] Pipeline активен — запуск нового не нужен")
-        return
+        return {"status": "running"}
 
-    # 3. Решаем: запускать или нет
     should_run, reason = _should_trigger()
     logger.info("[sp_runner] Проверка триггера: %s (%s)", "ЗАПУСК" if should_run else "пропуск", reason)
 
-    if should_run:
-        _start()
+    if not should_run:
+        return {"status": "skipped", "reason": reason}
+
+    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
+    if not run_pipeline.exists():
+        logger.error("[sp_runner] run_pipeline.py не найден: %s", run_pipeline)
+        return {"status": "error", "message": "no run_pipeline.py"}
+
+    send_message(
+        f"🚀 <b>ShortsProject Pipeline</b> (по этапам)\n"
+        f"Лог: {config.SP_LOG_FILE.name}"
+    )
+
+    _staged_active = True
+    _staged_started_at = time.time()
+    _clear_pid()
+
+    try:
+        state = _read_pipeline_state()
+        need_reset = not state.get("stages") or state.get("finished_at") is not None
+        if need_reset:
+            _reset_pipeline_state_subprocess()
+
+        for stage in config.SP_PIPELINE_STAGES:
+            state = _read_pipeline_state()
+            if _is_stage_done(state, stage):
+                logger.info("[sp_runner] Этап %s уже завершён — пропуск", stage)
+                continue
+
+            max_retries = config.SP_STAGE_MAX_RETRIES.get(stage, 1)
+            timeout = config.SP_STAGE_TIMEOUTS.get(stage, 3600)
+            ok = False
+
+            for attempt in range(1, max_retries + 1):
+                logger.info("[sp_runner] Этап %s — попытка %d/%d", stage, attempt, max_retries)
+                exit_code = _run_single_stage(stage, timeout)
+                if exit_code == 0:
+                    ok = True
+                    break
+                logger.warning(
+                    "[sp_runner] Этап %s попытка %d неудачна (код %d)",
+                    stage,
+                    attempt,
+                    exit_code,
+                )
+                if attempt < max_retries:
+                    time.sleep(config.SP_STAGE_BACKOFF_SEC)
+
+            if not ok:
+                if stage in config.SP_SKIPPABLE_STAGES:
+                    logger.warning("[sp_runner] Пропуск %s после %d неудач", stage, max_retries)
+                    send_message(
+                        f"⚠️ Pipeline: этап <code>{stage}</code> пропущен ({max_retries} попыток)"
+                    )
+                    continue
+                send_message(
+                    f"🔴 Pipeline: этап <code>{stage}</code> провалил все {max_retries} попыток"
+                )
+                _last_finished_at = time.time()
+                return {"status": "failed", "failed_stage": stage}
+
+        _reset_pipeline_state_subprocess()
+        _last_finished_at = time.time()
+        send_message("✅ <b>ShortsProject Pipeline</b> — все этапы завершены")
+        return {"status": "completed"}
+    finally:
+        _staged_active = False
+        _staged_started_at = None

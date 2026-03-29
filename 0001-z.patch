@@ -1,0 +1,998 @@
+From 9dbc5d82816874a8e47fc4577eed7220f5d2e987 Mon Sep 17 00:00:00 2001
+From: Alexey Martynov <65685397+NomelLime@users.noreply.github.com>
+Date: Sat, 28 Mar 2026 21:44:35 +0300
+Subject: [PATCH] z
+
+---
+ commander/notifier.py         |  92 ++++++++++++-
+ config.py                     |  35 +++++
+ db/connection.py              |  11 ++
+ db/experiences.py             |  31 ++++-
+ db/schema.sql                 |  22 +--
+ main_orchestrator.py          |  51 +++++--
+ modules/evaluator.py          |  99 +++++++++++++-
+ modules/evolution.py          |  36 ++++-
+ modules/orchestrator_graph.py |   6 +-
+ modules/sp_runner.py          | 245 ++++++++++++++++++++--------------
+ requirements.txt              |   1 +
+ 11 files changed, 495 insertions(+), 134 deletions(-)
+
+diff --git a/commander/notifier.py b/commander/notifier.py
+index 5afe101..c12c377 100644
+--- a/commander/notifier.py
++++ b/commander/notifier.py
+@@ -5,9 +5,12 @@ commander/notifier.py — Суточные сводки и уведомлени
+ Накапливает события в таблице notifications, раз в сутки формирует дайджест.
+ 
+ Экспортирует:
+-    send_message(text)          → отправить разовое сообщение
+-    log_notification(...)       → добавить в буфер дайджеста
+-    send_daily_digest_if_due()  → отправить сводку если пришло время
++    send_message(text)                 → отправить разовое сообщение
++    log_notification(...)              → добавить в буфер дайджеста
++    send_daily_digest_if_due()         → отправить сводку если пришло время
++    send_analytics_card(sp, pl)        → карточка метрик в Telegram
++    push_contenthub_event(...)         → POST /api/events (внутренний ключ)
++    send_digest_with_analytics_card()  → дайджест + карточка + событие в ContentHub
+ """
+ 
+ from __future__ import annotations
+@@ -15,7 +18,7 @@ from __future__ import annotations
+ import json
+ import logging
+ from datetime import datetime, date, timezone
+-from typing import Any, Dict, Optional
++from typing import Any, Dict, List, Optional, Tuple
+ 
+ import requests
+ 
+@@ -121,6 +124,87 @@ def send_daily_digest_if_due() -> bool:
+     return sent
+ 
+ 
++def send_analytics_card(sp_data: Optional[Dict[str, Any]], pl_data: Optional[Dict[str, Any]]) -> bool:
++    """
++    Короткая карточка SP + PreLend в Telegram (HTML).
++    Вызывать после успешного суточного дайджеста или при необходимости из графа.
++    """
++    sp = sp_data or {}
++    pl = pl_data or {}
++    if not sp and not pl:
++        return False
++
++    lines: List[str] = ["📇 <b>Аналитика (срез метрик)</b>"]
++    if sp.get("total_views") is not None or sp.get("total_likes") is not None:
++        tv = int(sp.get("total_views") or 0)
++        tl = int(sp.get("total_likes") or 0)
++        ctr = sp.get("avg_ctr")
++        ctr_s = f"{float(ctr):.4f}" if ctr is not None else "—"
++        plat = sp.get("top_platform") or "—"
++        lines.append(f"SP: 👁 {tv:,} | 👍 {tl:,} | CTR {ctr_s} | {plat}")
++    if pl.get("total_clicks") is not None:
++        tc = int(pl.get("total_clicks") or 0)
++        conv = int(pl.get("conversions") or 0)
++        cr = pl.get("cr")
++        cr_s = f"{float(cr):.4f}" if cr is not None else "—"
++        geo = pl.get("top_geo") or "—"
++        lines.append(f"PL: 🖱 {tc:,} | 💰 {conv} | CR {cr_s} | 🌍 {geo}")
++
++    if len(lines) <= 1:
++        return False
++    return send_message("\n".join(lines))
++
++
++def push_contenthub_event(source: str, event_type: str, payload: Dict[str, Any]) -> bool:
++    """Отправляет событие в ContentHub POST /api/events (внутренний ключ)."""
++    base = (config.CONTENTHUB_URL or "").rstrip("/")
++    key = config.CONTENTHUB_EVENTS_KEY or ""
++    if not base or not key:
++        return False
++    url = f"{base}/api/events"
++    try:
++        resp = requests.post(
++            url,
++            json={"source": source, "event_type": event_type, "payload": payload},
++            headers={"X-Internal-Events-Key": key, "Content-Type": "application/json"},
++            timeout=8,
++        )
++        if resp.status_code not in (200, 201):
++            logger.warning(
++                "[Notifier] ContentHub events %s: HTTP %s",
++                url,
++                resp.status_code,
++            )
++            return False
++        return True
++    except Exception as exc:
++        logger.warning("[Notifier] ContentHub events: %s", exc)
++        return False
++
++
++def send_digest_with_analytics_card(
++    sp_data: Optional[Dict[str, Any]],
++    pl_data: Optional[Dict[str, Any]],
++) -> Tuple[bool, bool]:
++    """
++    Как send_daily_digest_if_due(), плюс при успешной отправке дайджеста —
++    карточка аналитики и событие в ContentHub.
++    """
++    digest_sent = send_daily_digest_if_due()
++    card_sent = False
++    if digest_sent:
++        card_sent = send_analytics_card(sp_data, pl_data)
++        push_contenthub_event(
++            "orchestrator",
++            "daily_digest",
++            {
++                "date": date.today().isoformat(),
++                "analytics_card_sent": card_sent,
++            },
++        )
++    return digest_sent, card_sent
++
++
+ def _build_digest(today: str) -> str:
+     """Формирует текст суточного дайджеста из данных в БД."""
+     with get_db() as conn:
+diff --git a/config.py b/config.py
+index 6c3210a..667a739 100644
+--- a/config.py
++++ b/config.py
+@@ -9,6 +9,16 @@ from __future__ import annotations
+ import os
+ from pathlib import Path
+ 
++# Единый файл секретов монорепы: GitHub/.secrets.env, затем Orchestrator/.env
++try:
++    from dotenv import load_dotenv as _load_dotenv
++
++    _orc_dir = Path(__file__).resolve().parent
++    _load_dotenv(_orc_dir.parent / ".secrets.env", override=False)
++    _load_dotenv(_orc_dir / ".env", override=True)
++except ImportError:
++    pass
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Пути
+ # ─────────────────────────────────────────────────────────────────────────────
+@@ -113,6 +123,10 @@ TELEGRAM_CHAT_ID    = os.getenv("ORC_TG_CHAT_ID", "")  # твой chat_id
+ # Время ежедневной сводки (локальное время, HH:MM)
+ DAILY_DIGEST_TIME   = os.getenv("ORC_DIGEST_TIME", "09:00")
+ 
++# ContentHub: POST /api/events (заголовок X-Internal-Events-Key = ключ из ContentHub)
++CONTENTHUB_URL        = os.getenv("ORC_CONTENTHUB_URL", "").rstrip("/")
++CONTENTHUB_EVENTS_KEY = os.getenv("ORC_CONTENTHUB_EVENTS_KEY", "")
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Git
+ # ─────────────────────────────────────────────────────────────────────────────
+@@ -169,6 +183,27 @@ SP_PIPELINE_MAX_DURATION_HOURS = int(os.getenv("ORC_SP_MAX_HOURS", "4"))
+ # PID-файл для хранения PID между перезапусками Orchestrator
+ SP_PIPELINE_PID_FILE = BASE_DIR / "data" / ".sp_pipeline.pid"
+ 
++# Поэтапный pipeline (run_pipeline.py --only)
++SP_STAGE_MAX_RETRIES = {
++    "search": 2,
++    "download": 2,
++    "processing": 1,
++    "distribute": 1,
++    "upload": 3,
++    "finalize": 1,
++}
++SP_STAGE_TIMEOUTS = {
++    "search": 600,
++    "download": 1800,
++    "processing": 7200,
++    "distribute": 300,
++    "upload": 3600,
++    "finalize": 600,
++}
++SP_SKIPPABLE_STAGES = {"search", "download"}
++SP_STAGE_BACKOFF_SEC = 60
++SP_PIPELINE_STAGES = ["search", "download", "processing", "distribute", "upload", "finalize"]
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Режим безопасности
+ # ─────────────────────────────────────────────────────────────────────────────
+diff --git a/db/connection.py b/db/connection.py
+index 5be1684..d52f330 100644
+--- a/db/connection.py
++++ b/db/connection.py
+@@ -29,6 +29,16 @@ def _migrate_applied_changes_commit_hash(conn: sqlite3.Connection) -> None:
+         conn.execute("ALTER TABLE applied_changes ADD COLUMN commit_hash TEXT")
+ 
+ 
++def _migrate_plan_quality_llm_judge(conn: sqlite3.Connection) -> None:
++    """Колонки LLM-as-judge для plan_quality_scores."""
++    rows = conn.execute("PRAGMA table_info(plan_quality_scores)").fetchall()
++    cols = {r[1] for r in rows}
++    if "llm_judge_score" not in cols:
++        conn.execute("ALTER TABLE plan_quality_scores ADD COLUMN llm_judge_score INTEGER")
++    if "llm_judge_reasoning" not in cols:
++        conn.execute("ALTER TABLE plan_quality_scores ADD COLUMN llm_judge_reasoning TEXT")
++
++
+ def init_db() -> None:
+     """
+     Создаёт БД и применяет schema.sql если таблицы ещё не существуют.
+@@ -46,6 +56,7 @@ def init_db() -> None:
+         # Выполняем весь schema.sql (CREATE TABLE IF NOT EXISTS — идемпотентно)
+         conn.executescript(schema_sql)
+         _migrate_applied_changes_commit_hash(conn)
++        _migrate_plan_quality_llm_judge(conn)
+         conn.commit()
+         logger.info("[DB] Инициализирована: %s", config.DB_PATH)
+     finally:
+diff --git a/db/experiences.py b/db/experiences.py
+index 275a01d..9226bf4 100644
+--- a/db/experiences.py
++++ b/db/experiences.py
+@@ -243,13 +243,42 @@ def save_plan_quality_score(
+         return cursor.lastrowid
+ 
+ 
++def update_plan_quality_llm_judge(row_id: int, score: int, reasoning: str) -> None:
++    """Записывает оценку LLM-as-judge в строку plan_quality_scores."""
++    with get_db() as conn:
++        conn.execute(
++            """
++            UPDATE plan_quality_scores
++            SET llm_judge_score = ?, llm_judge_reasoning = ?
++            WHERE id = ?
++            """,
++            (score, (reasoning or "")[:500], row_id),
++        )
++
++
++def get_avg_llm_judge_stats() -> tuple[Optional[float], int]:
++    """Средний llm_judge_score и число оценок (для промпта evolution)."""
++    with get_db() as conn:
++        row = conn.execute(
++            """
++            SELECT AVG(llm_judge_score) AS av, COUNT(*) AS cnt
++            FROM plan_quality_scores
++            WHERE llm_judge_score IS NOT NULL
++            """
++        ).fetchone()
++    if not row or row["cnt"] == 0:
++        return None, 0
++    return float(row["av"]), int(row["cnt"])
++
++
+ def get_recent_plan_scores(limit: int = 5) -> List[Dict]:
+     """Возвращает последние оценки качества планов для LLM-промпта."""
+     with get_db() as conn:
+         rows = conn.execute("""
+             SELECT pqs.plan_id, pqs.evaluated_at, pqs.views_delta_pct,
+                    pqs.ctr_delta_pct, pqs.cr_delta_pct, pqs.ban_delta,
+-                   pqs.overall_score, pqs.zones_affected
++                   pqs.overall_score, pqs.zones_affected,
++                   pqs.llm_judge_score, pqs.llm_judge_reasoning
+             FROM plan_quality_scores pqs
+             ORDER BY pqs.evaluated_at DESC
+             LIMIT ?
+diff --git a/db/schema.sql b/db/schema.sql
+index 2eb93dc..69a8bef 100644
+--- a/db/schema.sql
++++ b/db/schema.sql
+@@ -280,16 +280,18 @@ CREATE INDEX IF NOT EXISTS idx_config_snapshots_file
+ -- Таблица 13: Оценки качества планов (FEAT-D)
+ -- ─────────────────────────────────────────────────────────────────────────────
+ CREATE TABLE IF NOT EXISTS plan_quality_scores (
+-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+-    plan_id         INTEGER REFERENCES evolution_plans(id),
+-    evaluated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+-    views_delta_pct REAL,       -- % изменения views за 24ч
+-    ctr_delta_pct   REAL,       -- % изменения CTR
+-    cr_delta_pct    REAL,       -- % изменения conversion rate
+-    ban_delta       INTEGER,    -- изменение ban_count
+-    overall_score   REAL,       -- взвешенная оценка (-100..+100)
+-    model_used      TEXT,       -- какая LLM модель генерировала план
+-    zones_affected  TEXT        -- JSON list зон
++    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
++    plan_id             INTEGER REFERENCES evolution_plans(id),
++    evaluated_at        TEXT NOT NULL DEFAULT (datetime('now')),
++    views_delta_pct     REAL,       -- % изменения views за 24ч
++    ctr_delta_pct       REAL,       -- % изменения CTR
++    cr_delta_pct        REAL,       -- % изменения conversion rate
++    ban_delta           INTEGER,    -- изменение ban_count
++    overall_score       REAL,       -- взвешенная оценка (-100..+100)
++    model_used          TEXT,       -- какая LLM модель генерировала план
++    zones_affected      TEXT,       -- JSON list зон
++    llm_judge_score     INTEGER,    -- 1–10 от LLM-as-judge (после ретроспективы)
++    llm_judge_reasoning TEXT        -- краткое обоснование
+ );
+ 
+ CREATE INDEX IF NOT EXISTS idx_plan_quality_plan
+diff --git a/main_orchestrator.py b/main_orchestrator.py
+index 8cabac4..3818913 100644
+--- a/main_orchestrator.py
++++ b/main_orchestrator.py
+@@ -25,6 +25,7 @@ main_orchestrator.py — Главный цикл Orchestrator.
+ from __future__ import annotations
+ 
+ import logging
++import os
+ import threading
+ import time
+ from datetime import datetime
+@@ -64,18 +65,44 @@ def trigger_force_cycle() -> None:
+ # Логирование
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+-logging.basicConfig(
+-    level   = logging.INFO,
+-    format  = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+-    datefmt = "%Y-%m-%d %H:%M:%S",
+-    handlers = [
+-        logging.StreamHandler(),
+-        logging.FileHandler(
+-            config.BASE_DIR / "data" / "orchestrator.log",
+-            encoding = "utf-8",
+-        ),
+-    ]
+-)
++_log_file = config.BASE_DIR / "data" / "orchestrator.log"
++if os.getenv("LOG_FORMAT", "").strip().lower() == "json":
++    try:
++        from pythonjsonlogger import jsonlogger
++
++        _root = logging.getLogger()
++        _root.handlers.clear()
++        _root.setLevel(logging.INFO)
++        _fmt = jsonlogger.JsonFormatter(
++            "%(asctime)s %(name)s %(levelname)s %(message)s",
++            datefmt="%Y-%m-%dT%H:%M:%S",
++        )
++        _sh = logging.StreamHandler()
++        _sh.setFormatter(_fmt)
++        _fh = logging.FileHandler(_log_file, encoding="utf-8")
++        _fh.setFormatter(_fmt)
++        _root.addHandler(_sh)
++        _root.addHandler(_fh)
++    except Exception:
++        logging.basicConfig(
++            level=logging.INFO,
++            format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
++            datefmt="%Y-%m-%d %H:%M:%S",
++            handlers=[
++                logging.StreamHandler(),
++                logging.FileHandler(_log_file, encoding="utf-8"),
++            ],
++        )
++else:
++    logging.basicConfig(
++        level=logging.INFO,
++        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
++        datefmt="%Y-%m-%d %H:%M:%S",
++        handlers=[
++            logging.StreamHandler(),
++            logging.FileHandler(_log_file, encoding="utf-8"),
++        ],
++    )
+ logger = logging.getLogger("Orchestrator")
+ 
+ 
+diff --git a/modules/evaluator.py b/modules/evaluator.py
+index 4d70282..d97318f 100644
+--- a/modules/evaluator.py
++++ b/modules/evaluator.py
+@@ -15,12 +15,18 @@ from __future__ import annotations
+ 
+ import json
+ import logging
++import re
+ from datetime import datetime, timedelta, timezone
+ from typing import Any, Dict, List, Optional
+ 
+ from db.connection  import get_db
+-from db.experiences import update_metric_impact, save_plan_quality_score
++from db.experiences import (
++    update_metric_impact,
++    save_plan_quality_score,
++    update_plan_quality_llm_judge,
++)
+ import config as _config
++from integrations.ollama_client import call_llm
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -60,7 +66,7 @@ def evaluate_pending_changes() -> int:
+         else:
+             logger.debug("[Evaluator] Нет снапшотов для оценки #%d", change["id"])
+ 
+-    # Агрегируем дельты по плану → записываем plan_quality_scores
++    # Агрегируем дельты по плану → записываем plan_quality_scores + LLM-as-judge
+     for plan_id, deltas in plan_deltas.items():
+         _save_plan_quality(plan_id, deltas)
+ 
+@@ -106,7 +112,7 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
+     except Exception:
+         pass
+ 
+-    save_plan_quality_score(
++    row_id = save_plan_quality_score(
+         plan_id        = plan_id,
+         views_delta_pct= views_delta,
+         ctr_delta_pct  = ctr_delta,
+@@ -117,12 +123,99 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
+         zones_affected = zones_affected,
+     )
+     logger.info("[Evaluator] plan_quality_scores для плана #%d: score=%.2f", plan_id, score)
++    _score_plan_quality_llm(plan_id, deltas, row_id)
+ 
+ 
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Выборка необработанных изменений
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
++def _parse_llm_json_obj(raw: str) -> Optional[Dict[str, Any]]:
++    """Извлекает первый JSON-объект из ответа LLM."""
++    if not raw:
++        return None
++    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
++    start = clean.find("{")
++    if start == -1:
++        return None
++    depth = 0
++    in_str = False
++    escaped = False
++    for i, ch in enumerate(clean[start:], start):
++        if escaped:
++            escaped = False
++            continue
++        if ch == "\\" and in_str:
++            escaped = True
++            continue
++        if ch == '"':
++            in_str = not in_str
++            continue
++        if in_str:
++            continue
++        if ch == "{":
++            depth += 1
++        elif ch == "}":
++            depth -= 1
++            if depth == 0:
++                try:
++                    return json.loads(clean[start : i + 1])
++                except json.JSONDecodeError:
++                    return None
++    return None
++
++
++def _score_plan_quality_llm(plan_id: int, deltas: list, pqs_row_id: int) -> None:
++    """LLM-as-judge: оценка плана по агрегированным дельтам метрик."""
++    merged: Dict[str, Any] = {}
++    for d in deltas:
++        if isinstance(d, dict):
++            merged.update(d)
++
++    with get_db() as conn:
++        plan = conn.execute(
++            "SELECT summary, risk_level FROM evolution_plans WHERE id = ?",
++            (plan_id,),
++        ).fetchone()
++    if not plan:
++        return
++
++    prompt = f"""Ты — эксперт по оценке решений в системе автоматизации.
++
++Был сгенерирован план:
++  Описание: {plan['summary'][:800]}
++  Уровень риска: {plan['risk_level']}
++
++Результат через 24 часа (дельта метрик):
++  {json.dumps(merged, ensure_ascii=False, indent=2)}
++
++Оцени качество этого плана от 1 до 10:
++  1-3: план навредил или не дал эффекта
++  4-6: нейтральный или минимальный эффект
++  7-8: хороший результат
++  9-10: отличный результат
++
++Верни ТОЛЬКО JSON: {{"score": N, "reasoning": "краткое обоснование"}}"""
++
++    raw = call_llm(model=_config.OLLAMA_STRATEGY_MODEL, prompt=prompt)
++    parsed = _parse_llm_json_obj(raw or "")
++    if not parsed or "score" not in parsed:
++        logger.debug("[Evaluator] LLM judge: нет валидного JSON для плана #%d", plan_id)
++        return
++
++    try:
++        score = max(1, min(10, int(parsed["score"])))
++    except (TypeError, ValueError):
++        return
++    reasoning = str(parsed.get("reasoning", ""))[:500]
++
++    try:
++        update_plan_quality_llm_judge(pqs_row_id, score, reasoning)
++        logger.info("[Evaluator] LLM judge план #%d: score=%d", plan_id, score)
++    except Exception as exc:
++        logger.warning("[Evaluator] LLM judge save: %s", exc)
++
++
+ def _get_unevaluated_changes() -> List[Dict]:
+     cutoff = _shift_hours(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), -_MIN_AGE_HOURS)
+     with get_db() as conn:
+diff --git a/modules/evolution.py b/modules/evolution.py
+index 62aefdc..8b813fe 100644
+--- a/modules/evolution.py
++++ b/modules/evolution.py
+@@ -13,13 +13,17 @@ from __future__ import annotations
+ import json
+ import logging
+ import re
++import time
+ from datetime import datetime, timezone
+ from typing import Any, Dict, List, Optional
+ 
+ import config
+ from db.experiences import (
+-    save_evolution_plan, get_rich_experience_context, get_failed_patterns,
++    save_evolution_plan,
++    get_rich_experience_context,
++    get_failed_patterns,
+     get_recent_plan_scores,
++    get_avg_llm_judge_stats,
+ )
+ from db.zones       import get_all_zones
+ from db.commands    import get_all_policies
+@@ -64,6 +68,19 @@ def _safe_finances_block(finances: dict) -> str:
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _should_defer_llm() -> bool:
++    """True если ShortsProject в этапе с тяжёлой VL нагрузкой — отложить стратегический LLM."""
++    state_file = config.SHORTS_PROJECT_DIR / "data" / "pipeline_state.json"
++    try:
++        st = json.loads(state_file.read_text(encoding="utf-8"))
++        cur = st.get("current_stage")
++        if cur in ("processing", "search", "upload"):
++            return True
++    except (FileNotFoundError, json.JSONDecodeError, OSError):
++        pass
++    return False
++
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Главная функция
+ # ─────────────────────────────────────────────────────────────────────────────
+@@ -78,6 +95,10 @@ def generate_plan(metrics_data: Dict[str, Any]) -> Optional[Dict]:
+     Returns:
+         dict плана (в формате JSON-схемы из промпта) или None при ошибке.
+     """
++    if _should_defer_llm():
++        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM на 5 мин")
++        time.sleep(300)
++
+     prompt = _build_prompt(metrics_data)
+     logger.info("[Evolution] Запрос к LLM (модель: %s)", config.OLLAMA_STRATEGY_MODEL)
+ 
+@@ -177,6 +198,8 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
+         quality_block = "\n=== КАЧЕСТВО ПОСЛЕДНИХ ПЛАНОВ (оценка через 24ч) ===\n"
+         for s in recent_scores:
+             line = f"  План #{s['plan_id']}: score={s['overall_score']:+.1f}"
++            if s.get("llm_judge_score") is not None:
++                line += f", LLM={s['llm_judge_score']}/10"
+             if s.get('views_delta_pct') is not None:
+                 line += f", views={s['views_delta_pct']:+.1f}%"
+             if s.get("ctr_delta_pct") is not None:
+@@ -184,8 +207,19 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
+             if s.get("cr_delta_pct") is not None:
+                 line += f", CR={s['cr_delta_pct']:+.1f}%"
+             quality_block += line + "\n"
++        avg_llm, n_llm = get_avg_llm_judge_stats()
++        if n_llm and avg_llm is not None:
++            quality_block += f"\n  Средний LLM-as-judge по прошлым планам: {avg_llm:.1f} (из {n_llm} оценок)\n"
++        else:
++            quality_block += "\n  Средний LLM-as-judge: N/A (пока нет оценок)\n"
+     else:
+         quality_block = ""
++        avg_llm, n_llm = get_avg_llm_judge_stats()
++        if n_llm and avg_llm is not None:
++            quality_block = (
++                "\n=== КАЧЕСТВО ПЛАНОВ (LLM-as-judge) ===\n"
++                f"  Средний score: {avg_llm:.1f} (из {n_llm} оценок)\n"
++            )
+ 
+     # ── Рекомендации Strategist SP ────────────────────────────────────────────
+     # Strategist уже проанализировал данные SP 6 часов назад — используем его
+diff --git a/modules/orchestrator_graph.py b/modules/orchestrator_graph.py
+index 6e073db..058b9b8 100644
+--- a/modules/orchestrator_graph.py
++++ b/modules/orchestrator_graph.py
+@@ -471,7 +471,11 @@ def _node_digest(state: OrchestratorState) -> OrchestratorState:
+             node_outcome=cs.OK,
+         )
+     logger.info("[9/9] Проверка суточного дайджеста...")
+-    notifier.send_daily_digest_if_due()
++    md = state.get("metrics_data") or {}
++    notifier.send_digest_with_analytics_card(
++        md.get("shorts_project"),
++        md.get("prelend"),
++    )
+     return {}
+ 
+ 
+diff --git a/modules/sp_runner.py b/modules/sp_runner.py
+index 61f77f2..9689329 100644
+--- a/modules/sp_runner.py
++++ b/modules/sp_runner.py
+@@ -1,18 +1,5 @@
+ """
+-modules/sp_runner.py — Управление процессом ShortsProject pipeline.
+-
+-Orchestrator запускает run_pipeline.py как дочерний subprocess и управляет
+-его жизненным циклом: запуск, мониторинг, детект зависания, алерт при краше.
+-
+-Триггеры запуска (проверяются каждый цикл Orchestrator):
+-  1. upload_queue суммарно по всем аккаунтам < SP_PIPELINE_QUEUE_THRESHOLD
+-  2. С последнего запуска прошло > SP_PIPELINE_INTERVAL_HOURS
+-
+-Состояние сохраняется в PID-файл — Orchestrator восстанавливает слежку
+-за процессом после перезапуска.
+-
+-Экспортирует:
+-    manage_sp_pipeline(metrics_data) → None  (вызывается из main_orchestrator)
++modules/sp_runner.py — Управление ShortsProject pipeline по этапам (--only + checkpoint).
+ """
+ 
+ from __future__ import annotations
+@@ -25,25 +12,20 @@ import sys
+ import time
+ from datetime import datetime
+ from pathlib import Path
+-from typing import Optional
++from typing import Any, Dict, Optional
+ 
+ import config
+ from commander.notifier import send_message
+ 
+ logger = logging.getLogger(__name__)
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# Внутреннее состояние (module-level singleton)
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+ _process: Optional[subprocess.Popen] = None
+-_started_at: Optional[float] = None   # unix timestamp старта текущего процесса
+-_last_finished_at: Optional[float] = None  # unix timestamp последнего завершения
++_started_at: Optional[float] = None
++_last_finished_at: Optional[float] = None
+ 
++_staged_active: bool = False
++_staged_started_at: Optional[float] = None
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# PID-файл: персистентность состояния между перезапусками Orchestrator
+-# ─────────────────────────────────────────────────────────────────────────────
+ 
+ def _save_pid(pid: int, started_at: float) -> None:
+     try:
+@@ -74,7 +56,6 @@ def _clear_pid() -> None:
+ 
+ 
+ def _pid_is_alive(pid: int) -> bool:
+-    """Проверяет, живёт ли процесс с данным PID (кросс-платформенно)."""
+     try:
+         os.kill(pid, 0)
+         return True
+@@ -82,26 +63,23 @@ def _pid_is_alive(pid: int) -> bool:
+         return False
+ 
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# Управление процессом
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+ def is_running() -> bool:
+-    """Возвращает True если SP pipeline процесс сейчас активен."""
+     global _process, _started_at
+ 
++    if _staged_active:
++        return True
++
+     if _process is not None:
+-        return _process.poll() is None  # None = ещё работает
++        return _process.poll() is None
+ 
+-    # Восстановление после перезапуска Orchestrator: проверяем PID-файл
+     saved = _load_pid()
+     if saved and _pid_is_alive(saved["pid"]):
+-        logger.info("[sp_runner] Восстановлен PID %d из файла (запущен %s)",
+-                    saved["pid"],
+-                    datetime.fromtimestamp(saved["started_at"]).strftime("%H:%M:%S"))
++        logger.info(
++            "[sp_runner] Восстановлен PID %d из файла (запущен %s)",
++            saved["pid"],
++            datetime.fromtimestamp(saved["started_at"]).strftime("%H:%M:%S"),
++        )
+         _started_at = saved["started_at"]
+-        # Не можем получить Popen объект по PID — просто следим через os.kill
+-        # Используем флаг _started_at для детекта зависания
+         return True
+ 
+     _clear_pid()
+@@ -109,7 +87,6 @@ def is_running() -> bool:
+ 
+ 
+ def _count_queue_depth() -> int:
+-    """Подсчитывает суммарное число видео в upload_queue по всем аккаунтам."""
+     total = 0
+     video_ext = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+     accounts_dir = config.SP_ACCOUNTS_DIR
+@@ -126,23 +103,17 @@ def _count_queue_depth() -> int:
+ 
+ 
+ def _should_trigger() -> tuple[bool, str]:
+-    """
+-    Определяет, нужно ли запускать pipeline прямо сейчас.
+-    Возвращает (True, причина) или (False, причина).
+-    """
+     global _last_finished_at
+ 
+     if is_running():
+         return False, "уже запущен"
+ 
+-    # Проверка минимального интервала
+     if _last_finished_at is not None:
+         elapsed_h = (time.time() - _last_finished_at) / 3600
+         if elapsed_h < config.SP_PIPELINE_INTERVAL_HOURS:
+             remaining = config.SP_PIPELINE_INTERVAL_HOURS - elapsed_h
+             return False, f"слишком рано (ещё {remaining:.1f}ч)"
+ 
+-    # Проверка глубины очереди
+     depth = _count_queue_depth()
+     if depth >= config.SP_PIPELINE_QUEUE_THRESHOLD:
+         return False, f"очередь полная ({depth} видео ≥ порога {config.SP_PIPELINE_QUEUE_THRESHOLD})"
+@@ -150,62 +121,76 @@ def _should_trigger() -> tuple[bool, str]:
+     return True, f"очередь низкая ({depth} видео < порога {config.SP_PIPELINE_QUEUE_THRESHOLD})"
+ 
+ 
+-def _start() -> bool:
+-    """Запускает run_pipeline.py в директории ShortsProject. Возвращает True при успехе."""
+-    global _process, _started_at
++def _read_pipeline_state() -> dict:
++    state_file = config.SHORTS_PROJECT_DIR / "data" / "pipeline_state.json"
++    try:
++        return json.loads(state_file.read_text(encoding="utf-8"))
++    except (FileNotFoundError, json.JSONDecodeError):
++        return {"stages": {}}
+ 
+-    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
+-    if not run_pipeline.exists():
+-        logger.error("[sp_runner] run_pipeline.py не найден: %s", run_pipeline)
+-        return False
+ 
+-    log_path = config.SP_LOG_FILE
++def _is_stage_done(state: dict, stage: str) -> bool:
++    st = (state.get("stages") or {}).get(stage, {})
++    return st.get("status") == "done"
++
++
++def _reset_pipeline_state_subprocess() -> None:
++    cmd = [
++        sys.executable,
++        "-c",
++        "from pipeline.pipeline_state import reset_state; reset_state()",
++    ]
+     try:
++        subprocess.run(
++            cmd,
++            cwd=str(config.SHORTS_PROJECT_DIR),
++            capture_output=True,
++            text=True,
++            timeout=60,
++        )
++    except Exception as e:
++        logger.warning("[sp_runner] reset_state: %s", e)
++
++
++def _run_single_stage(stage: str, timeout: int) -> int:
++    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
++    cmd = [sys.executable, str(run_pipeline), "--only", stage]
++    try:
++        log_path = config.SP_LOG_FILE
+         log_path.parent.mkdir(parents=True, exist_ok=True)
+-        log_file = open(str(log_path), "a", encoding="utf-8")
+-        try:
+-            _process = subprocess.Popen(
+-                [sys.executable, str(run_pipeline)],
++        with open(str(log_path), "a", encoding="utf-8") as logf:
++            result = subprocess.run(
++                cmd,
++                timeout=timeout,
+                 cwd=str(config.SHORTS_PROJECT_DIR),
+-                stdout=log_file,
+-                stderr=log_file,
+-                # Новый процесс не привязан к Orchestrator — переживёт его перезапуск
+-                close_fds=True,
++                stdout=logf,
++                stderr=subprocess.STDOUT,
++                text=True,
+             )
+-        finally:
+-            # Закрываем Python-дескриптор — subprocess уже унаследовал fd
+-            log_file.close()
+-        _started_at = time.time()
+-        _save_pid(_process.pid, _started_at)
+-
+-        logger.info("[sp_runner] ShortsProject pipeline запущен (PID %d)", _process.pid)
+-        send_message(
+-            f"🚀 <b>ShortsProject Pipeline запущен</b>\n"
+-            f"PID: {_process.pid}\n"
+-            f"Лог: {log_path.name}"
+-        )
+-        return True
+-
++        return int(result.returncode)
++    except subprocess.TimeoutExpired:
++        logger.error("[sp_runner] Stage %s timeout (%ds)", stage, timeout)
++        return -1
+     except Exception as e:
+-        logger.error("[sp_runner] Не удалось запустить pipeline: %s", e)
+-        send_message(f"🔴 <b>SP Pipeline — ошибка запуска</b>\n{e}")
+-        return False
++        logger.error("[sp_runner] Stage %s error: %s", stage, e)
++        return -1
+ 
+ 
+ def _check_hung() -> None:
+-    """Проверяет, не завис ли pipeline. Если да — отправляет алерт."""
+-    global _started_at
++    global _started_at, _staged_started_at
+ 
+-    if _started_at is None:
++    t0 = _started_at or _staged_started_at
++    if t0 is None:
+         return
+ 
+-    elapsed_h = (time.time() - _started_at) / 3600
++    elapsed_h = (time.time() - t0) / 3600
+     max_h = config.SP_PIPELINE_MAX_DURATION_HOURS
+ 
+     if elapsed_h > max_h:
+         logger.warning(
+             "[sp_runner] Pipeline работает %.1fч (макс %dч) — возможно завис!",
+-            elapsed_h, max_h,
++            elapsed_h,
++            max_h,
+         )
+         send_message(
+             f"⚠️ <b>SP Pipeline — возможное зависание</b>\n"
+@@ -214,8 +199,7 @@ def _check_hung() -> None:
+         )
+ 
+ 
+-def _on_finished(exit_code: int) -> None:
+-    """Вызывается когда pipeline завершил работу."""
++def _on_finished_legacy(exit_code: int) -> None:
+     global _last_finished_at, _process, _started_at
+ 
+     _last_finished_at = time.time()
+@@ -239,35 +223,92 @@ def _on_finished(exit_code: int) -> None:
+         )
+ 
+ 
+-# ─────────────────────────────────────────────────────────────────────────────
+-# Публичный интерфейс
+-# ─────────────────────────────────────────────────────────────────────────────
+-
+-def manage_sp_pipeline(metrics_data: dict = None) -> None:
++def manage_sp_pipeline(metrics_data: dict | None = None) -> Dict[str, Any]:
+     """
+-    Главная функция — вызывается из main_orchestrator каждый цикл.
+-    Проверяет состояние текущего процесса и решает, нужен ли новый запуск.
+-
+-    Args:
+-        metrics_data: данные из tracking (не используется пока, зарезервировано)
++    Запускает pipeline по этапам с retry и checkpoint.
+     """
++    global _last_finished_at, _process, _started_at, _staged_active, _staged_started_at
++
+     if not config.SP_PIPELINE_ENABLED:
+-        return
++        return {"status": "disabled"}
+ 
+-    # 1. Проверяем живой ли текущий процесс
+     if _process is not None and not is_running():
+         rc = _process.poll()
+-        _on_finished(rc if rc is not None else -1)
++        _on_finished_legacy(rc if rc is not None else -1)
+ 
+-    # 2. Детект зависания
+     if is_running():
+         _check_hung()
+         logger.debug("[sp_runner] Pipeline активен — запуск нового не нужен")
+-        return
++        return {"status": "running"}
+ 
+-    # 3. Решаем: запускать или нет
+     should_run, reason = _should_trigger()
+     logger.info("[sp_runner] Проверка триггера: %s (%s)", "ЗАПУСК" if should_run else "пропуск", reason)
+ 
+-    if should_run:
+-        _start()
++    if not should_run:
++        return {"status": "skipped", "reason": reason}
++
++    run_pipeline = config.SHORTS_PROJECT_DIR / "run_pipeline.py"
++    if not run_pipeline.exists():
++        logger.error("[sp_runner] run_pipeline.py не найден: %s", run_pipeline)
++        return {"status": "error", "message": "no run_pipeline.py"}
++
++    send_message(
++        f"🚀 <b>ShortsProject Pipeline</b> (по этапам)\n"
++        f"Лог: {config.SP_LOG_FILE.name}"
++    )
++
++    _staged_active = True
++    _staged_started_at = time.time()
++    _clear_pid()
++
++    try:
++        state = _read_pipeline_state()
++        need_reset = not state.get("stages") or state.get("finished_at") is not None
++        if need_reset:
++            _reset_pipeline_state_subprocess()
++
++        for stage in config.SP_PIPELINE_STAGES:
++            state = _read_pipeline_state()
++            if _is_stage_done(state, stage):
++                logger.info("[sp_runner] Этап %s уже завершён — пропуск", stage)
++                continue
++
++            max_retries = config.SP_STAGE_MAX_RETRIES.get(stage, 1)
++            timeout = config.SP_STAGE_TIMEOUTS.get(stage, 3600)
++            ok = False
++
++            for attempt in range(1, max_retries + 1):
++                logger.info("[sp_runner] Этап %s — попытка %d/%d", stage, attempt, max_retries)
++                exit_code = _run_single_stage(stage, timeout)
++                if exit_code == 0:
++                    ok = True
++                    break
++                logger.warning(
++                    "[sp_runner] Этап %s попытка %d неудачна (код %d)",
++                    stage,
++                    attempt,
++                    exit_code,
++                )
++                if attempt < max_retries:
++                    time.sleep(config.SP_STAGE_BACKOFF_SEC)
++
++            if not ok:
++                if stage in config.SP_SKIPPABLE_STAGES:
++                    logger.warning("[sp_runner] Пропуск %s после %d неудач", stage, max_retries)
++                    send_message(
++                        f"⚠️ Pipeline: этап <code>{stage}</code> пропущен ({max_retries} попыток)"
++                    )
++                    continue
++                send_message(
++                    f"🔴 Pipeline: этап <code>{stage}</code> провалил все {max_retries} попыток"
++                )
++                _last_finished_at = time.time()
++                return {"status": "failed", "failed_stage": stage}
++
++        _reset_pipeline_state_subprocess()
++        _last_finished_at = time.time()
++        send_message("✅ <b>ShortsProject Pipeline</b> — все этапы завершены")
++        return {"status": "completed"}
++    finally:
++        _staged_active = False
++        _staged_started_at = None
+diff --git a/requirements.txt b/requirements.txt
+index 5197b49..b4630a3 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -5,4 +5,5 @@ langgraph>=0.2
+ portalocker>=2.8        # кросс-платформенные файловые блокировки (Windows + Linux)
+ -e ../shared_gpu_lock   # GPUResourceManager + общий .gpu_lock с ShortsProject
+ python-dotenv>=1.0
++python-json-logger>=2.0.7
+ pytest>=7.0
+\ No newline at end of file
+-- 
+2.53.0.windows.2
+

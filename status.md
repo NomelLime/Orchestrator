@@ -607,3 +607,12 @@ LLM-план с scope="visual", new_value="cinematic"
 | **Тесты** | `tests/test_cycle_semantics.py`; pytest suite зелёный. |
 
 **ContentHub:** дашборд показывает `cycle_outcome` / `cycle_summary` / `node_outcomes`; вкладка **«Команды ОР»** и `GET /api/operator-commands/trace` читают `policy_command_trace.jsonl` (см. `ContentHub/status.md`).
+
+### Сессия 23 (29.03.2026) — Code Review: Security Fixes
+
+| Область | Изменение |
+|---------|-----------|
+| **`modules/orchestrator_graph.py`** | **[CRITICAL]** `_cleanup_old_data()`: SQL f-string injection → белый список `_ALLOWED_TABLES` + `age_modifier` передаётся как SQL-параметр через `?`. Переменные `table` и `extra` по-прежнему из фиксированных констант, но defence-in-depth предотвращает инъекцию при будущих изменениях `_tables`. |
+| **`modules/evolution.py`** | **[MEDIUM]** `generate_plan()`: `time.sleep(300)` при SP VL stage → `return {"_deferred": True}`. Больше не блокирует основной цикл Orchestrator на 5 минут. `main_orchestrator.py` должен обрабатывать deferred-результат. |
+
+**Контекст:** Часть полного code review экосистемы. Critical fix — единственная SQL-инъекция во всей кодовой базе.

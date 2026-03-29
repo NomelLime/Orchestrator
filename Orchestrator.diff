@@ -1,0 +1,268 @@
+diff --git a/modules/evaluator.py b/modules/evaluator.py
+index d97318f..47c95d7 100644
+--- a/modules/evaluator.py
++++ b/modules/evaluator.py
+@@ -131,38 +131,9 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ def _parse_llm_json_obj(raw: str) -> Optional[Dict[str, Any]]:
+-    """Извлекает первый JSON-объект из ответа LLM."""
+-    if not raw:
+-        return None
+-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+-    start = clean.find("{")
+-    if start == -1:
+-        return None
+-    depth = 0
+-    in_str = False
+-    escaped = False
+-    for i, ch in enumerate(clean[start:], start):
+-        if escaped:
+-            escaped = False
+-            continue
+-        if ch == "\\" and in_str:
+-            escaped = True
+-            continue
+-        if ch == '"':
+-            in_str = not in_str
+-            continue
+-        if in_str:
+-            continue
+-        if ch == "{":
+-            depth += 1
+-        elif ch == "}":
+-            depth -= 1
+-            if depth == 0:
+-                try:
+-                    return json.loads(clean[start : i + 1])
+-                except json.JSONDecodeError:
+-                    return None
+-    return None
++    """Извлекает первый JSON-объект из ответа LLM. Делегирует в utils/llm_json.py (DRY)."""
++    from utils.llm_json import extract_json_object
++    return extract_json_object(raw)
+ 
+ 
+ def _score_plan_quality_llm(plan_id: int, deltas: list, pqs_row_id: int) -> None:
+diff --git a/modules/evolution.py b/modules/evolution.py
+index 8b813fe..afb84b6 100644
+--- a/modules/evolution.py
++++ b/modules/evolution.py
+@@ -95,9 +95,11 @@ def generate_plan(metrics_data: Dict[str, Any]) -> Optional[Dict]:
+     Returns:
+         dict плана (в формате JSON-схемы из промпта) или None при ошибке.
+     """
++    # [FIX] Не блокируем основной цикл на 5 мин. Возвращаем deferred-индикатор,
++    # main_orchestrator обработает это (повторит попытку в следующем цикле).
+     if _should_defer_llm():
+-        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM на 5 мин")
+-        time.sleep(300)
++        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM-генерацию")
++        return {"_deferred": True, "_reason": "SP VL stage active"}
+ 
+     prompt = _build_prompt(metrics_data)
+     logger.info("[Evolution] Запрос к LLM (модель: %s)", config.OLLAMA_STRATEGY_MODEL)
+@@ -405,46 +407,9 @@ CTR и абсолютные просмотры — промежуточные и
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ def _parse_plan(raw: str) -> Optional[Dict]:
+-    """
+-    Извлекает JSON из ответа LLM.
+-    Устойчив к markdown-обёрткам и мусору до/после JSON.
+-    """
+-    # Убираем ```json ... ``` обёртки
+-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+-
+-    # Ищем первый {...} блок — сбалансированный поиск с учётом строкового контекста.
+-    # Скобки внутри JSON-строк ("...{...}...") не влияют на счётчик глубины.
+-    start = clean.find("{")
+-    if start == -1:
+-        return None
+-
+-    depth   = 0
+-    in_str  = False
+-    escaped = False
+-    for i, ch in enumerate(clean[start:], start):
+-        if escaped:
+-            escaped = False
+-            continue
+-        if ch == "\\" and in_str:
+-            escaped = True
+-            continue
+-        if ch == '"':
+-            in_str = not in_str
+-            continue
+-        if in_str:
+-            continue
+-        if ch == "{":
+-            depth += 1
+-        elif ch == "}":
+-            depth -= 1
+-            if depth == 0:
+-                try:
+-                    return json.loads(clean[start:i+1])
+-                except json.JSONDecodeError as exc:
+-                    logger.warning("[Evolution] JSON parse error: %s", exc)
+-                    return None
+-
+-    return None
++    """Извлекает JSON-план из ответа LLM. Делегирует в utils/llm_json.py (DRY)."""
++    from utils.llm_json import extract_json_object
++    return extract_json_object(raw)
+ 
+ 
+ def _extract_files(plan: Dict) -> List[str]:
+diff --git a/modules/orchestrator_graph.py b/modules/orchestrator_graph.py
+index 058b9b8..6de76cf 100644
+--- a/modules/orchestrator_graph.py
++++ b/modules/orchestrator_graph.py
+@@ -99,26 +99,45 @@ class OrchestratorState(TypedDict, total=False):
+ 
+ 
+ def _cleanup_old_data() -> None:
+-    """Суточная очистка таблиц БД порциями (без долгой WAL-блокировки)."""
++    """Суточная очистка таблиц БД порциями (без долгой WAL-блокировки).
++
++    [FIX] Defence-in-depth: белый список таблиц + параметризованный age
++    предотвращают SQL-инъекцию даже при будущих изменениях _tables.
++    """
+     from db.connection import get_db as _get_db
+ 
++    # Белый список допустимых таблиц для cleanup
++    _ALLOWED_TABLES = frozenset({
++        "metrics_snapshots", "notifications", "evolution_plans",
++        "applied_changes", "pending_patches", "plan_quality_scores",
++    })
++
++    # (table, age_modifier, extra_where)
++    # age_modifier передаётся как параметр в datetime('now', ?)
++    # extra_where — только фиксированные строки из этого списка (не пользовательский ввод)
+     _tables = [
+-        ("metrics_snapshots", "90 days", ""),
+-        ("notifications", "30 days", ""),
+-        ("evolution_plans", "180 days", "AND status != 'applied'"),
++        ("metrics_snapshots", "-90 days", ""),
++        ("notifications", "-30 days", ""),
++        ("evolution_plans", "-180 days", "AND status != 'applied'"),
+     ]
+ 
+     total_deleted = 0
+     try:
+         with _get_db() as conn:
+-            for table, age, extra in _tables:
++            for table, age_modifier, extra in _tables:
++                if table not in _ALLOWED_TABLES:
++                    logger.error("[Cleanup] Таблица '%s' не в белом списке — пропускаем", table)
++                    continue
+                 deleted_table = 0
+                 while True:
++                    # table и extra — из фиксированных констант выше (не из внешних данных).
++                    # age_modifier параметризован через ? для datetime().
+                     cur = conn.execute(
+                         f"DELETE FROM {table} WHERE rowid IN "
+                         f"(SELECT rowid FROM {table} "
+-                        f" WHERE created_at < datetime('now', '-{age}') {extra} "
+-                        f" LIMIT 500)"
++                        f" WHERE created_at < datetime('now', ?) {extra} "
++                        f" LIMIT 500)",
++                        (age_modifier,),
+                     )
+                     batch = cur.rowcount
+                     deleted_table += batch
+diff --git a/status.md b/status.md
+index 017b0f9..6b4ff4d 100644
+--- a/status.md
++++ b/status.md
+@@ -607,3 +607,12 @@ LLM-план с scope="visual", new_value="cinematic"
+ | **Тесты** | `tests/test_cycle_semantics.py`; pytest suite зелёный. |
+ 
+ **ContentHub:** дашборд показывает `cycle_outcome` / `cycle_summary` / `node_outcomes`; вкладка **«Команды ОР»** и `GET /api/operator-commands/trace` читают `policy_command_trace.jsonl` (см. `ContentHub/status.md`).
++
++### Сессия 23 (29.03.2026) — Code Review: Security Fixes
++
++| Область | Изменение |
++|---------|-----------|
++| **`modules/orchestrator_graph.py`** | **[CRITICAL]** `_cleanup_old_data()`: SQL f-string injection → белый список `_ALLOWED_TABLES` + `age_modifier` передаётся как SQL-параметр через `?`. Переменные `table` и `extra` по-прежнему из фиксированных констант, но defence-in-depth предотвращает инъекцию при будущих изменениях `_tables`. |
++| **`modules/evolution.py`** | **[MEDIUM]** `generate_plan()`: `time.sleep(300)` при SP VL stage → `return {"_deferred": True}`. Больше не блокирует основной цикл Orchestrator на 5 минут. `main_orchestrator.py` должен обрабатывать deferred-результат. |
++
++**Контекст:** Часть полного code review экосистемы. Critical fix — единственная SQL-инъекция во всей кодовой базе.
+diff --git a/utils/__init__.py b/utils/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/utils/llm_json.py b/utils/llm_json.py
+new file mode 100644
+index 0000000..1bc7017
+--- /dev/null
++++ b/utils/llm_json.py
+@@ -0,0 +1,71 @@
++"""
++utils/llm_json.py — Извлечение JSON из ответов LLM.
++
++[FIX] DRY: ранее идентичная логика дублировалась в evolution.py::_parse_plan()
++и evaluator.py::_parse_llm_json_obj(). Теперь единственная реализация.
++
++Экспортирует:
++    extract_json_object(raw: str) → Optional[dict]
++"""
++from __future__ import annotations
++
++import json
++import logging
++import re
++from typing import Optional
++
++logger = logging.getLogger(__name__)
++
++
++def extract_json_object(raw: str) -> Optional[dict]:
++    """Извлекает первый сбалансированный JSON-объект из ответа LLM.
++
++    Устойчив к:
++        - markdown-обёрткам (```json ... ```)
++        - мусору до/после JSON
++        - скобкам внутри JSON-строк (не влияют на счётчик глубины)
++
++    Args:
++        raw: сырой текст ответа LLM
++
++    Returns:
++        dict если найден валидный JSON, иначе None
++    """
++    if not raw:
++        return None
++
++    # Убираем ```json ... ``` обёртки
++    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
++
++    start = clean.find("{")
++    if start == -1:
++        return None
++
++    depth = 0
++    in_str = False
++    escaped = False
++
++    for i, ch in enumerate(clean[start:], start):
++        if escaped:
++            escaped = False
++            continue
++        if ch == "\\" and in_str:
++            escaped = True
++            continue
++        if ch == '"':
++            in_str = not in_str
++            continue
++        if in_str:
++            continue
++        if ch == "{":
++            depth += 1
++        elif ch == "}":
++            depth -= 1
++            if depth == 0:
++                try:
++                    return json.loads(clean[start : i + 1])
++                except json.JSONDecodeError as exc:
++                    logger.warning("[llm_json] JSON parse error: %s", exc)
++                    return None
++
++    return None

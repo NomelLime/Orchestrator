@@ -99,26 +99,45 @@ class OrchestratorState(TypedDict, total=False):
 
 
 def _cleanup_old_data() -> None:
-    """Суточная очистка таблиц БД порциями (без долгой WAL-блокировки)."""
+    """Суточная очистка таблиц БД порциями (без долгой WAL-блокировки).
+
+    [FIX] Defence-in-depth: белый список таблиц + параметризованный age
+    предотвращают SQL-инъекцию даже при будущих изменениях _tables.
+    """
     from db.connection import get_db as _get_db
 
+    # Белый список допустимых таблиц для cleanup
+    _ALLOWED_TABLES = frozenset({
+        "metrics_snapshots", "notifications", "evolution_plans",
+        "applied_changes", "pending_patches", "plan_quality_scores",
+    })
+
+    # (table, age_modifier, extra_where)
+    # age_modifier передаётся как параметр в datetime('now', ?)
+    # extra_where — только фиксированные строки из этого списка (не пользовательский ввод)
     _tables = [
-        ("metrics_snapshots", "90 days", ""),
-        ("notifications", "30 days", ""),
-        ("evolution_plans", "180 days", "AND status != 'applied'"),
+        ("metrics_snapshots", "-90 days", ""),
+        ("notifications", "-30 days", ""),
+        ("evolution_plans", "-180 days", "AND status != 'applied'"),
     ]
 
     total_deleted = 0
     try:
         with _get_db() as conn:
-            for table, age, extra in _tables:
+            for table, age_modifier, extra in _tables:
+                if table not in _ALLOWED_TABLES:
+                    logger.error("[Cleanup] Таблица '%s' не в белом списке — пропускаем", table)
+                    continue
                 deleted_table = 0
                 while True:
+                    # table и extra — из фиксированных констант выше (не из внешних данных).
+                    # age_modifier параметризован через ? для datetime().
                     cur = conn.execute(
                         f"DELETE FROM {table} WHERE rowid IN "
                         f"(SELECT rowid FROM {table} "
-                        f" WHERE created_at < datetime('now', '-{age}') {extra} "
-                        f" LIMIT 500)"
+                        f" WHERE created_at < datetime('now', ?) {extra} "
+                        f" LIMIT 500)",
+                        (age_modifier,),
                     )
                     batch = cur.rowcount
                     deleted_table += batch

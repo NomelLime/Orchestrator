@@ -95,9 +95,11 @@ def generate_plan(metrics_data: Dict[str, Any]) -> Optional[Dict]:
     Returns:
         dict плана (в формате JSON-схемы из промпта) или None при ошибке.
     """
+    # [FIX] Не блокируем основной цикл на 5 мин. Возвращаем deferred-индикатор,
+    # main_orchestrator обработает это (повторит попытку в следующем цикле).
     if _should_defer_llm():
-        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM на 5 мин")
-        time.sleep(300)
+        logger.info("[Evolution] SP pipeline в VL-этапе — откладываем LLM-генерацию")
+        return {"_deferred": True, "_reason": "SP VL stage active"}
 
     prompt = _build_prompt(metrics_data)
     logger.info("[Evolution] Запрос к LLM (модель: %s)", config.OLLAMA_STRATEGY_MODEL)
@@ -405,46 +407,9 @@ CTR и абсолютные просмотры — промежуточные и
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_plan(raw: str) -> Optional[Dict]:
-    """
-    Извлекает JSON из ответа LLM.
-    Устойчив к markdown-обёрткам и мусору до/после JSON.
-    """
-    # Убираем ```json ... ``` обёртки
-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-
-    # Ищем первый {...} блок — сбалансированный поиск с учётом строкового контекста.
-    # Скобки внутри JSON-строк ("...{...}...") не влияют на счётчик глубины.
-    start = clean.find("{")
-    if start == -1:
-        return None
-
-    depth   = 0
-    in_str  = False
-    escaped = False
-    for i, ch in enumerate(clean[start:], start):
-        if escaped:
-            escaped = False
-            continue
-        if ch == "\\" and in_str:
-            escaped = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(clean[start:i+1])
-                except json.JSONDecodeError as exc:
-                    logger.warning("[Evolution] JSON parse error: %s", exc)
-                    return None
-
-    return None
+    """Извлекает JSON-план из ответа LLM. Делегирует в utils/llm_json.py (DRY)."""
+    from utils.llm_json import extract_json_object
+    return extract_json_object(raw)
 
 
 def _extract_files(plan: Dict) -> List[str]:

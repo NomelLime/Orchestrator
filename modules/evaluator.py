@@ -131,38 +131,9 @@ def _save_plan_quality(plan_id: int, deltas: list) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_llm_json_obj(raw: str) -> Optional[Dict[str, Any]]:
-    """Извлекает первый JSON-объект из ответа LLM."""
-    if not raw:
-        return None
-    clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-    start = clean.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    escaped = False
-    for i, ch in enumerate(clean[start:], start):
-        if escaped:
-            escaped = False
-            continue
-        if ch == "\\" and in_str:
-            escaped = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(clean[start : i + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
+    """Извлекает первый JSON-объект из ответа LLM. Делегирует в utils/llm_json.py (DRY)."""
+    from utils.llm_json import extract_json_object
+    return extract_json_object(raw)
 
 
 def _score_plan_quality_llm(plan_id: int, deltas: list, pqs_row_id: int) -> None:

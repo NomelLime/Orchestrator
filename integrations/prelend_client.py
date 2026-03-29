@@ -20,6 +20,7 @@ import os
 from typing import Any, Dict, List, Optional, Union
 
 import requests
+from requests import Response
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class PreLendClient:
         self._base    = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
+        self._last_put_error: Optional[str] = None
         if api_key:
             self._session.headers["X-API-Key"] = api_key
 
@@ -65,6 +67,33 @@ class PreLendClient:
     def base_url(self) -> str:
         """URL Internal API (для логирования)."""
         return self._base
+
+    @property
+    def last_put_error(self) -> Optional[str]:
+        """Текст последней ошибки PUT /config/* (если write_* вернул False)."""
+        return self._last_put_error
+
+    @staticmethod
+    def _format_put_failure(r: Response) -> str:
+        code = r.status_code
+        try:
+            data = r.json()
+            d = data.get("detail")
+            if isinstance(d, str):
+                msg = d
+            elif isinstance(d, list):
+                parts = []
+                for item in d[:8]:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("msg", item)))
+                    else:
+                        parts.append(str(item))
+                msg = "; ".join(parts) if parts else str(d)[:400]
+            else:
+                msg = str(data)[:500]
+        except Exception:
+            msg = (r.text or "").strip()[:500]
+        return f"HTTP {code}: {msg}"
 
     # ── Метрики ────────────────────────────────────────────────────────────────
 
@@ -177,6 +206,7 @@ class PreLendClient:
             return {}
 
     def _put(self, path: str, json_body: Any = None, params: Dict = None) -> bool:
+        self._last_put_error = None
         try:
             r = self._session.put(
                 f"{self._base}{path}",
@@ -186,6 +216,8 @@ class PreLendClient:
             )
             if r.ok:
                 return True
+
+            self._last_put_error = self._format_put_failure(r)
 
             # Backward compatibility for old Internal API versions:
             # some deployments expect payload wrapped as {"body": ...}.
@@ -218,12 +250,17 @@ class PreLendClient:
                         timeout=self._timeout,
                     )
                     if r2.ok:
+                        self._last_put_error = None
                         logger.info("[PreLendClient] PUT %s: fallback payload format applied", path)
                         return True
+                    self._last_put_error = self._format_put_failure(r2)
 
-            r.raise_for_status()
+            logger.error("[PreLendClient] PUT %s не удался: %s", path, self._last_put_error)
             return False
         except requests.ConnectionError:
+            self._last_put_error = (
+                "Нет соединения с PreLend Internal API (проверьте SSH-туннель :9090 / WireGuard)."
+            )
             logger.error(
                 "[PreLendClient] Нет связи с PreLend API при PUT %s. "
                 "Изменение конфига НЕ применено.",
@@ -231,6 +268,7 @@ class PreLendClient:
             )
             return False
         except Exception as exc:
+            self._last_put_error = str(exc)
             logger.error("[PreLendClient] Ошибка PUT %s: %s", path, exc)
             return False
 

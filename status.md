@@ -616,3 +616,21 @@ LLM-план с scope="visual", new_value="cinematic"
 | **`modules/evolution.py`** | **[MEDIUM]** `generate_plan()`: `time.sleep(300)` при SP VL stage → `return {"_deferred": True}`. Больше не блокирует основной цикл Orchestrator на 5 минут. `main_orchestrator.py` должен обрабатывать deferred-результат. |
 
 **Контекст:** Часть полного code review экосистемы. Critical fix — единственная SQL-инъекция во всей кодовой базе.
+
+### Сессия 24 (31.03.2026) — Расширение telemetry/KPI цикла + health-метрики агентов
+
+| Область | Изменение |
+|---------|-----------|
+| **`modules/tracking.py`** | Добавлены агрегаты agent health для SP (`agent_health.total/running/idle/error/other/running_ratio`), `strategist_recs_count`, `analyst_verdicts_count`, а также проброс `traffic_alive/last_click_ago_sec` и `_unreachable` в `raw_summary` снапшотов. |
+| **`modules/decision_metrics.py`** (NEW) | Новый расчёт KPI качества решений и надёжности данных: `plan_apply_rate_30d`, `plan_success_24h_rate_30d`, `rollback_rate_30d`, patch-rates, freshness (`metrics_freshness_sec_*`), availability (`source_availability_ratio_*`), PL deltas (`cr_delta_24h`, `bot_pct_delta_24h`) и heartbeat. |
+| **`modules/orchestrator_graph.py`** | Узлы завернуты в timed-wrapper (`node_duration_sec`), в `cycle_summary` добавлены: `llm_latency_sec`, per-node durations, operational counters (`commands_processed`, `sp_pipeline_status`, `supply_requests`, apply counters) и блок `decision_metrics`. |
+
+**Итог в telemetry (`data/orchestrator_telemetry.json`):**
+- `cycle_summary.decision_metrics`
+- `cycle_summary.node_duration_sec`
+- `cycle_summary.llm_latency_sec`
+- расширенные operational поля применения плана/патчей.
+
+**Тесты/проверки:**
+- `python -m pytest tests/test_tracking.py tests/test_cycle_semantics.py -q` — ✅
+- Lints по изменённым файлам — ✅

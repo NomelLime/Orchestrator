@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,37 @@ def _safe_read_json(path: Path) -> Optional[Dict]:
             return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("[Tracking] Не удалось прочитать %s: %s", path, exc)
+    return None
+
+
+def _summarize_agent_statuses(agent_statuses: Dict[str, Any]) -> Dict[str, Any]:
+    """Агрегирует статусы агентов в компактные health-метрики."""
+    counts = Counter()
+    for raw in (agent_statuses or {}).values():
+        status = str(raw or "").strip().upper()
+        if status in {"RUNNING", "ACTIVE", "OK"}:
+            counts["running"] += 1
+        elif status in {"IDLE", "SLEEP", "WAITING"}:
+            counts["idle"] += 1
+        elif status in {"ERROR", "FAILED", "CRASHED"}:
+            counts["error"] += 1
+        else:
+            counts["other"] += 1
+    total = sum(counts.values())
+    return {
+        "total": total,
+        "running": counts["running"],
+        "idle": counts["idle"],
+        "error": counts["error"],
+        "other": counts["other"],
+        "running_ratio": (counts["running"] / total) if total > 0 else None,
+    }
+
+
+def _safe_primitive(value: Any) -> Any:
+    """Возвращает JSON-совместимый scalar; иначе None."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     return None
 
 
@@ -67,8 +99,17 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         "ab_summary":      [],
         "ban_count":       0,
         "agent_statuses":  {},
+        "agent_health":    {
+            "total": 0,
+            "running": 0,
+            "idle": 0,
+            "error": 0,
+            "other": 0,
+            "running_ratio": None,
+        },
         "raw_uploads":     [],
         "strategist_recs": {},  # рекомендации Strategist из agent_memory KV
+        "strategist_recs_count": 0,
     }
 
     # ── analytics.json ───────────────────────────────────────────────────────
@@ -144,6 +185,7 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
     memory = _safe_read_json(config.SP_AGENT_MEMORY)
     if memory:
         result["agent_statuses"] = memory.get("agents", {})
+        result["agent_health"] = _summarize_agent_statuses(result["agent_statuses"])
 
         kv = memory.get("kv", {})
 
@@ -161,6 +203,7 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
             if k.startswith("rec.strategist.")
         }
         result["strategist_recs"] = strategist_recs
+        result["strategist_recs_count"] = len(strategist_recs)
         if strategist_recs:
             logger.debug("[Tracking] Strategist рекомендации: %s", list(strategist_recs.keys()))
 
@@ -197,6 +240,7 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         "top_geo":            None,
         "shave_suspects":     [],
         "analyst_verdicts":   {},
+        "analyst_verdicts_count": 0,
         "traffic_alive":      None,
         "last_click_ago_sec": None,
         "_unreachable":       True,
@@ -234,8 +278,9 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
             for s in data.get("shave_suspects", [])
         ],
         "analyst_verdicts":   data.get("analyst_verdicts", {}),
-        "traffic_alive":      health.get("traffic_alive"),
-        "last_click_ago_sec": health.get("last_click_ago_sec"),
+        "analyst_verdicts_count": len(data.get("analyst_verdicts", {}) or {}),
+        "traffic_alive":      _safe_primitive(health.get("traffic_alive")),
+        "last_click_ago_sec": _safe_primitive(health.get("last_click_ago_sec")),
         "_unreachable":       False,
     }
 
@@ -274,7 +319,10 @@ def collect_all_and_save() -> Dict[str, Any]:
         raw_summary     = {
             "ab_summary":     sp["ab_summary"][:5],
             "agent_statuses": sp["agent_statuses"],
+            "agent_health":   sp["agent_health"],
+            "strategist_recs_count": sp["strategist_recs_count"],
             "top_uploads":    sp["raw_uploads"][:5],
+            "_analytics_available": bool(sp["total_views"] or sp["total_likes"] or sp["raw_uploads"]),
         },
     )
 
@@ -288,7 +336,11 @@ def collect_all_and_save() -> Dict[str, Any]:
         pl_top_geo      = pl["top_geo"],
         raw_summary     = {
             "shave_suspects":  pl["shave_suspects"],
-            "analyst_verdicts":pl["analyst_verdicts"],
+            "analyst_verdicts": pl["analyst_verdicts"],
+            "analyst_verdicts_count": pl["analyst_verdicts_count"],
+            "traffic_alive": pl["traffic_alive"],
+            "last_click_ago_sec": pl["last_click_ago_sec"],
+            "_unreachable": pl.get("_unreachable", False),
         },
     )
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, TypedDict
 
 import config
@@ -26,6 +27,7 @@ from modules import (
     evaluator,
     evolution,
     orchestrator_telemetry,
+    decision_metrics,
     plan_heuristics,
     policies,
     sp_runner,
@@ -96,6 +98,10 @@ class OrchestratorState(TypedDict, total=False):
     code_fail: int
     queued_patches: int
     heuristic_reason: str
+    commands_processed: int
+    sp_pipeline_status: str
+    supply_requests: int
+    node_durations: Dict[str, float]
 
 
 def _cleanup_old_data() -> None:
@@ -184,7 +190,7 @@ def _node_preflight(state: OrchestratorState) -> OrchestratorState:
             node_outcome=cs.PAUSED if paused else cs.OK,
             detail={"commands_processed": n_commands},
         )
-    upd: Dict[str, Any] = {"pause_evolution": paused}
+    upd: Dict[str, Any] = {"pause_evolution": paused, "commands_processed": int(n_commands or 0)}
     if paused:
         upd.update(_add_outcomes(state, cs.PAUSED))
     return upd
@@ -247,8 +253,17 @@ def _node_sp_pipeline(state: OrchestratorState) -> OrchestratorState:
             node_outcome=cs.OK,
         )
     logger.info("[5/9] SP Pipeline manager...")
-    sp_runner.manage_sp_pipeline(state["metrics_data"])
-    return {}
+    run_result = sp_runner.manage_sp_pipeline(state["metrics_data"]) or {}
+    status = str(run_result.get("status") or "unknown")
+    if tid:
+        orchestrator_telemetry.mark_step(
+            tid,
+            "sp_pipeline_result",
+            "Результат SP pipeline manager",
+            node_outcome=cs.OK,
+            detail={"status": status, "reason": run_result.get("reason")},
+        )
+    return {"sp_pipeline_status": status}
 
 
 def _node_supply_check(state: OrchestratorState) -> OrchestratorState:
@@ -261,12 +276,13 @@ def _node_supply_check(state: OrchestratorState) -> OrchestratorState:
             node_outcome=cs.OK,
         )
     cycle_num = int(state.get("cycle_num", 0))
+    supply_requests = 0
     if cycle_num % config.SUPPLY_CHECK_EVERY_N_CYCLES == 0:
         logger.info("[6/9] Проверка прокси/баланса...")
-        supply_requests = supply_tracker.check_supply(state["metrics_data"]["shorts_project"])
+        supply_requests = int(supply_tracker.check_supply(state["metrics_data"]["shorts_project"]) or 0)
         if supply_requests:
             logger.info("  Отправлено запросов оператору: %d", supply_requests)
-    return {}
+    return {"supply_requests": supply_requests}
 
 
 def _node_generate_plan(state: OrchestratorState) -> OrchestratorState:
@@ -518,21 +534,36 @@ def _route_after_wait(state: OrchestratorState) -> str:
     return "end" if state.get("plan_cancelled") else "apply_config"
 
 
+def _timed_node(node_name: str, fn):
+    """Оборачивает узел и сохраняет длительность выполнения."""
+    def _wrapped(state: OrchestratorState) -> OrchestratorState:
+        started = time.perf_counter()
+        upd = fn(state) or {}
+        elapsed = round(time.perf_counter() - started, 3)
+        prev = dict(state.get("node_durations") or {})
+        prev[node_name] = elapsed
+        if isinstance(upd, dict):
+            upd["node_durations"] = prev
+            return upd
+        return {"node_durations": prev}
+    return _wrapped
+
+
 def build_cycle_graph():
     """Собирает и компилирует LangGraph для одного цикла Orchestrator."""
     graph = StateGraph(OrchestratorState)
-    graph.add_node("preflight", _node_preflight)
-    graph.add_node("collect_metrics", _node_collect_metrics)
-    graph.add_node("crash_guard", _node_crash_guard)
-    graph.add_node("sp_pipeline", _node_sp_pipeline)
-    graph.add_node("supply_check", _node_supply_check)
-    graph.add_node("generate_plan", _node_generate_plan)
-    graph.add_node("announce_plan", _node_announce_plan)
-    graph.add_node("wait_before_apply", _node_wait_before_apply)
-    graph.add_node("apply_config", _node_apply_config)
-    graph.add_node("apply_code", _node_apply_code)
-    graph.add_node("finalize_plan", _node_finalize_plan)
-    graph.add_node("digest", _node_digest)
+    graph.add_node("preflight", _timed_node("preflight", _node_preflight))
+    graph.add_node("collect_metrics", _timed_node("collect_metrics", _node_collect_metrics))
+    graph.add_node("crash_guard", _timed_node("crash_guard", _node_crash_guard))
+    graph.add_node("sp_pipeline", _timed_node("sp_pipeline", _node_sp_pipeline))
+    graph.add_node("supply_check", _timed_node("supply_check", _node_supply_check))
+    graph.add_node("generate_plan", _timed_node("generate_plan", _node_generate_plan))
+    graph.add_node("announce_plan", _timed_node("announce_plan", _node_announce_plan))
+    graph.add_node("wait_before_apply", _timed_node("wait_before_apply", _node_wait_before_apply))
+    graph.add_node("apply_config", _timed_node("apply_config", _node_apply_config))
+    graph.add_node("apply_code", _timed_node("apply_code", _node_apply_code))
+    graph.add_node("finalize_plan", _timed_node("finalize_plan", _node_finalize_plan))
+    graph.add_node("digest", _timed_node("digest", _node_digest))
 
     graph.set_entry_point("preflight")
     graph.add_conditional_edges(
@@ -578,21 +609,36 @@ def run_cycle_graph(cycle_num: int) -> None:
     global _CYCLE_GRAPH
     if _CYCLE_GRAPH is None:
         _CYCLE_GRAPH = build_cycle_graph()
+    cycle_started_at = time.perf_counter()
     trace_id = orchestrator_telemetry.begin_cycle(cycle_num)
     try:
         final = _CYCLE_GRAPH.invoke(
             {"cycle_num": cycle_num, "trace_id": trace_id, "outcomes": []}
         )
         final_outcome = cs.merge_outcomes(final.get("outcomes") or [])
+        node_durations = dict(final.get("node_durations") or {})
+        kpis = decision_metrics.collect_decision_kpis()
         summary = cs.summarize_cycle(
             trace_id,
             cycle_num,
             final_outcome,
             extra={
+                "cycle_duration_sec": round(time.perf_counter() - cycle_started_at, 3),
+                "node_duration_sec": node_durations,
+                "llm_latency_sec": node_durations.get("generate_plan"),
                 "dry_run": bool(final.get("dry_run")),
                 "no_plan": bool(final.get("no_plan")),
                 "plan_cancelled": bool(final.get("plan_cancelled")),
                 "pause_evolution": bool(final.get("pause_evolution")),
+                "commands_processed": int(final.get("commands_processed") or 0),
+                "sp_pipeline_status": str(final.get("sp_pipeline_status") or "n/a"),
+                "supply_requests": int(final.get("supply_requests") or 0),
+                "config_applied_ok": int(final.get("cfg_ok") or 0),
+                "config_applied_fail": int(final.get("cfg_fail") or 0),
+                "code_applied_ok": int(final.get("code_ok") or 0),
+                "code_applied_fail": int(final.get("code_fail") or 0),
+                "queued_patches": int(final.get("queued_patches") or 0),
+                "decision_metrics": kpis,
             },
         )
         orchestrator_telemetry.record_cycle_summary(trace_id, summary)

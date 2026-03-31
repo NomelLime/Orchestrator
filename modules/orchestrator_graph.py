@@ -312,6 +312,18 @@ def _node_generate_plan(state: OrchestratorState) -> OrchestratorState:
         }
 
     plan = evolution.generate_plan(metrics_data)
+
+    # [FIX] Deferred: SP VL stage активна — LLM-вызов отложен, цикл завершается без плана
+    if isinstance(plan, dict) and plan.get("_deferred"):
+        reason = plan.get("_reason", "SP VL stage active")
+        logger.info("[Orchestrator] План отложен: %s", reason)
+        if tid:
+            orchestrator_telemetry.mark_step(
+                tid, "generate_plan", f"Отложен: {reason}",
+                node_outcome=cs.PAUSED, detail={"deferred": True, "reason": reason},
+            )
+        return {"no_plan": True, **_add_outcomes(state, cs.PAUSED)}
+
     if not plan:
         logger.warning("[Orchestrator] LLM не вернула план — цикл завершён без изменений")
         notifier.log_notification("LLM не вернула план эволюции", level="warning", category="plan")

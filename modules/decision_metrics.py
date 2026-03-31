@@ -152,7 +152,8 @@ def collect_decision_kpis() -> Dict[str, Any]:
             SELECT COUNT(*) AS c
             FROM metrics_snapshots
             WHERE source='PreLend' AND snapshot_at >= ?
-              AND (raw_summary_json NOT LIKE '%"_unreachable": true%')
+              AND (raw_summary_json NOT LIKE '%"_unreachable": true%'
+                   AND raw_summary_json NOT LIKE '%"_unreachable":true%')
             """,
             (cutoff_24h,),
         ).fetchone()["c"]

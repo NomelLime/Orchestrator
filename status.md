@@ -3,6 +3,19 @@
 
 ---
 
+## Сессия 25 (06.04.2026) — Миграция funnel/tracking под `vk/rutube/ok`
+
+| Область | Изменение |
+|---------|-----------|
+| **`modules/tracking.py`** | Добавлена нормализация платформенных алиасов: `youtube -> vk`, `tiktok/instagram -> ok`, `vk_video -> vk`, `odnoklassniki -> ok`; `top_platform` и `raw_uploads.platform` формируются в новом каноне. |
+| **`modules/funnel_linker.py`** | Поддержка dual-key для PreLend funnel (`utm_content_key` fallback к `utm_content`) без потери historical-данных. |
+| **`tests/test_tracking.py`** | Обновлено ожидание `top_platform` (legacy TikTok-трафик агрегируется в `ok`). |
+
+**Проверки:**
+- `pytest tests/test_tracking.py -q` — ✅ (все тесты зелёные после миграционных правок).
+
+---
+
 ## РОЛЬ
 Главный агент-оркестратор над ShortsProject и PreLend.
 Автономно собирает метрики, анализирует через LLM, генерирует и применяет планы эволюции.

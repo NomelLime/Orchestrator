@@ -116,18 +116,17 @@ def _build_funnel_rows_from_api(
     pl_conv_notes — строки conversions.notes для расчёта revenue
     """
     sub_id = f"sp_{stem}"
+    legacy_candidates = {sub_id}
 
     # Агрегируем клики по нашему sub_id
-    total_clicks = sum(
-        r["cnt"] for r in pl_clicks
-        if r.get("utm_content") == sub_id
-    )
-
-    # Конверсии — клики со статусом converted
-    total_convs = sum(
-        r["cnt"] for r in pl_clicks
-        if r.get("utm_content") == sub_id and r.get("status") == "converted"
-    )
+    total_clicks = 0
+    total_convs = 0
+    for r in pl_clicks:
+        key = r.get("utm_content_key") or r.get("utm_content")
+        if key in legacy_candidates:
+            total_clicks += int(r.get("cnt") or 0)
+            if r.get("status") == "converted":
+                total_convs += int(r.get("cnt") or 0)
 
     # Выручка через notes
     revenue = _calc_revenue_from_notes(sub_id, pl_conv_notes)

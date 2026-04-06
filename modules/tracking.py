@@ -30,6 +30,14 @@ from db.metrics import save_snapshot
 
 logger = logging.getLogger(__name__)
 
+_PLATFORM_ALIASES = {
+    "youtube": "vk",
+    "tiktok": "ok",
+    "instagram": "ok",
+    "vk_video": "vk",
+    "odnoklassniki": "ok",
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -143,10 +151,11 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
                 views    = upload.get("views") or 0
                 likes    = upload.get("likes") or 0
                 comments = upload.get("comments") or 0
+                platform_norm = _PLATFORM_ALIASES.get(str(platform).strip().lower(), str(platform).strip().lower())
 
                 result["total_views"] += views
                 result["total_likes"] += likes
-                platform_views[platform] = platform_views.get(platform, 0) + views
+                platform_views[platform_norm] = platform_views.get(platform_norm, 0) + views
 
                 # CTR: (likes + comments) / views — простая прокси-метрика
                 if views > 0:
@@ -155,7 +164,7 @@ def collect_shorts_project_snapshot(period_hours: int = 24) -> Dict[str, Any]:
 
                 recent_uploads.append({
                     "stem":       stem,
-                    "platform":   platform,
+                    "platform":   platform_norm,
                     "views":      views,
                     "likes":      likes,
                     "ab_variant": upload.get("ab_variant"),

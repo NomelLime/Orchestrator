@@ -83,7 +83,7 @@ class TestShortsProjectTracking:
 
         from modules.tracking import collect_shorts_project_snapshot
         result = collect_shorts_project_snapshot()
-        assert result["top_platform"] == "tiktok"
+        assert result["top_platform"] == "ok"
 
     def test_ctr_calculation(self, make_sp_analytics):
         """CTR = (likes + comments) / views."""

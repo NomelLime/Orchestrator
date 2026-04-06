@@ -217,7 +217,7 @@ def make_prelend_db(tmp_path):
                     click.get("ip"),
                     click.get("geo", "BR"),
                     click.get("device"),
-                    click.get("platform", "youtube"),
+                    click.get("platform", "vk"),
                     click.get("advertiser_id"),
                     click.get("utm_source"),
                     click.get("utm_medium"),

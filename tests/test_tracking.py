@@ -36,8 +36,8 @@ class TestShortsProjectTracking:
                 "title": "Test Video 1",
                 "tags": ["test"],
                 "uploads": {
-                    "youtube": {
-                        "url": "https://yt.be/1",
+                    "vk": {
+                        "url": "https://vk.com/video1",
                         "uploaded_at": now_iso,
                         "views": 1000,
                         "likes": 50,
@@ -50,8 +50,8 @@ class TestShortsProjectTracking:
                 "title": "Test Video 2",
                 "tags": [],
                 "uploads": {
-                    "tiktok": {
-                        "url": "https://tiktok.com/2",
+                    "rutube": {
+                        "url": "https://rutube.ru/video/2",
                         "uploaded_at": now_iso,
                         "views": 500,
                         "likes": 20,
@@ -74,9 +74,9 @@ class TestShortsProjectTracking:
         make_sp_analytics({
             "vid_001": {
                 "uploads": {
-                    "youtube":   {"uploaded_at": now_iso, "views": 100, "likes": 5,  "comments": 1},
-                    "tiktok":    {"uploaded_at": now_iso, "views": 5000,"likes": 200,"comments": 50},
-                    "instagram": {"uploaded_at": now_iso, "views": 200, "likes": 10, "comments": 2},
+                    "vk":     {"uploaded_at": now_iso, "views": 100, "likes": 5,  "comments": 1},
+                    "rutube": {"uploaded_at": now_iso, "views": 300,"likes": 20,"comments": 5},
+                    "ok":     {"uploaded_at": now_iso, "views": 5000, "likes": 200, "comments": 50},
                 }
             }
         })
@@ -91,7 +91,7 @@ class TestShortsProjectTracking:
         make_sp_analytics({
             "vid_001": {
                 "uploads": {
-                    "youtube": {
+                    "vk": {
                         "uploaded_at": now_iso,
                         "views": 1000, "likes": 80, "comments": 20
                     }
@@ -111,7 +111,7 @@ class TestShortsProjectTracking:
         make_sp_analytics({
             "old_vid": {
                 "uploads": {
-                    "youtube": {
+                    "vk": {
                         "uploaded_at": old_iso,
                         "views": 9999, "likes": 999, "comments": 99
                     }
@@ -129,8 +129,8 @@ class TestShortsProjectTracking:
         make_sp_analytics({
             "vid_ab": {
                 "uploads": {
-                    "youtube": {"uploaded_at": now_iso, "views": 100, "ab_variant": "A"},
-                    "tiktok":  {"uploaded_at": now_iso, "views": 200, "ab_variant": "B"},
+                    "vk":     {"uploaded_at": now_iso, "views": 100, "ab_variant": "A"},
+                    "rutube": {"uploaded_at": now_iso, "views": 200, "ab_variant": "B"},
                 },
                 "ab_test": {
                     "A": {"title": "Title A", "tags": []},
@@ -263,7 +263,7 @@ class TestCollectAllAndSave:
         now_iso = datetime.now().isoformat()
         make_sp_analytics({
             "vid_001": {
-                "uploads": {"youtube": {"uploaded_at": now_iso, "views": 100, "likes": 5}}
+                "uploads": {"vk": {"uploaded_at": now_iso, "views": 100, "likes": 5}}
             }
         })
         # Mock уже настроен в conftest: total_clicks=150
@@ -289,7 +289,7 @@ class TestCollectAllAndSave:
         now_iso = datetime.now().isoformat()
         make_sp_analytics({
             "vid_x": {
-                "uploads": {"youtube": {"uploaded_at": now_iso, "views": 50, "likes": 2}}
+                "uploads": {"vk": {"uploaded_at": now_iso, "views": 50, "likes": 2}}
             }
         })
         mock_prelend_client.is_available.return_value = False

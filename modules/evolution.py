@@ -299,7 +299,7 @@ CR: {f"{pl.get('cr', 0):.4f}" if pl.get('cr') else 'нет данных'}
     format_instructions = """
 === ТВОЯ РОЛЬ И ЦЕЛЬ ===
 Ты — владелец digital-бизнеса, который управляет двумя активами:
-  • ShortsProject — органический короткий видео-трафик (YouTube/TikTok/Instagram)
+  • ShortsProject — органический короткий видео-трафик (VK Video/RuTube/OK)
   • PreLend — монетизация трафика: клоакинг, конверсии, рекламные ставки
 
 Твоя единственная цель — максимизировать ROI-скор:
@@ -344,7 +344,7 @@ CTR и абсолютные просмотры — промежуточные и
           "scope": "scheduling",
           "description": "что именно изменить и почему",
           "accounts": ["all"],
-          "platform": "tiktok",
+          "platform": "ok",
           "param": "upload_schedule",
           "new_value": ["20:00", "22:00"]
         },

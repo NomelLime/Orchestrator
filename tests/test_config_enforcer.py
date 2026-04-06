@@ -17,7 +17,7 @@ class TestApplySpVisual:
         import config
         acc_dir = config.SP_ACCOUNTS_DIR / name
         acc_dir.mkdir(parents=True, exist_ok=True)
-        cfg = {"platforms": ["youtube"], "visual_filter": visual_filter}
+        cfg = {"platforms": ["vk"], "visual_filter": visual_filter}
         (acc_dir / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
         return acc_dir
 

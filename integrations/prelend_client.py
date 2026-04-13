@@ -112,6 +112,14 @@ class PreLendClient:
         """Данные для cross-project воронки (SP stem → PL clicks)."""
         return self._get("/metrics/funnel", params={"period_hours": period_hours})
 
+    def get_hook_metrics(self, period_hours: int = 168) -> Dict[str, Any]:
+        """Эффективность hook_type/creative_id."""
+        return self._get("/metrics/hooks", params={"period_hours": period_hours})
+
+    def get_risk_metrics(self, period_hours: int = 168) -> Dict[str, Any]:
+        """Риск-оценки по advertiser/geo/hook_type."""
+        return self._get("/metrics/risk", params={"period_hours": period_hours})
+
     # ── Конфиги ────────────────────────────────────────────────────────────────
 
     def get_config(self, name: str) -> Union[Dict, List]:

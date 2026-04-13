@@ -296,3 +296,27 @@ CREATE TABLE IF NOT EXISTS plan_quality_scores (
 
 CREATE INDEX IF NOT EXISTS idx_plan_quality_plan
     ON plan_quality_scores(plan_id, evaluated_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Таблица 14: Реестр агентных событий (сквозная аналитика)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS agent_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    source_project  TEXT NOT NULL,                 -- ShortsProject | PreLend | ContentHub | Orchestrator
+    agent_name      TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    severity        TEXT NOT NULL DEFAULT 'info',  -- info | warning | error
+    creative_id     TEXT,
+    hook_type       TEXT,
+    experiment_id   TEXT,
+    agent_run_id    TEXT,
+    payload_json    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_created
+    ON agent_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_events_creative
+    ON agent_events(creative_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_events_experiment
+    ON agent_events(experiment_id, created_at DESC);

@@ -33,6 +33,7 @@ from modules import (
     sp_runner,
     supply_tracker,
     tracking,
+    rollout_kpi,
     zones as zones_module,
 )
 
@@ -98,6 +99,11 @@ class OrchestratorState(TypedDict, total=False):
     code_fail: int
     queued_patches: int
     heuristic_reason: str
+    trend_radar: Dict[str, Any]
+    experiment_hints: Dict[str, Any]
+    weekly_brief: Dict[str, Any]
+    policy_blocked: bool
+    policy_reason: str
     commands_processed: int
     sp_pipeline_status: str
     supply_requests: int
@@ -224,6 +230,47 @@ def _node_collect_metrics(state: OrchestratorState) -> OrchestratorState:
     return upd
 
 
+def _node_trend_radar(state: OrchestratorState) -> OrchestratorState:
+    """
+    TrendRadarAgent: извлекает short-term сигналы из текущих метрик.
+    """
+    md = state.get("metrics_data") or {}
+    sp = md.get("shorts_project") or {}
+    raw_uploads = sp.get("raw_uploads") or []
+    top = raw_uploads[:5] if isinstance(raw_uploads, list) else []
+    candidate_topics: List[str] = []
+    for item in top:
+        if not isinstance(item, dict):
+            continue
+        stem = str(item.get("stem") or "").strip()
+        if stem:
+            candidate_topics.append(stem[:80])
+    trend = {
+        "generated_at": int(time.time()),
+        "top_platform": sp.get("top_platform"),
+        "candidate_topics": candidate_topics,
+    }
+    return {"trend_radar": trend}
+
+
+def _node_experiment_agent(state: OrchestratorState) -> OrchestratorState:
+    """
+    ExperimentAgent: формирует гипотезы A/B из трендов и текущих метрик.
+    """
+    trend = state.get("trend_radar") or {}
+    topics = trend.get("candidate_topics") or []
+    hints = {
+        "experiment_id": f"exp_{int(time.time())}",
+        "hypotheses": [
+            "hook_question_vs_statement",
+            "high_energy_voice_vs_neutral",
+            "tight_cut_1s_vs_2s",
+        ],
+        "topic_seed": topics[0] if topics else "generic",
+    }
+    return {"experiment_hints": hints}
+
+
 def _node_crash_guard(state: OrchestratorState) -> OrchestratorState:
     tid = state.get("trace_id", "")
     reverted = bool(code_evolver.check_and_revert_on_crash())
@@ -288,7 +335,11 @@ def _node_supply_check(state: OrchestratorState) -> OrchestratorState:
 def _node_generate_plan(state: OrchestratorState) -> OrchestratorState:
     tid = state.get("trace_id", "")
     logger.info("[7/9] Генерация плана эволюции (LLM)...")
-    metrics_data = state["metrics_data"]
+    metrics_data = dict(state["metrics_data"] or {})
+    if state.get("trend_radar"):
+        metrics_data["trend_radar"] = state.get("trend_radar")
+    if state.get("experiment_hints"):
+        metrics_data["experiment_hints"] = state.get("experiment_hints")
     skip, skip_code, skip_reason = plan_heuristics.should_skip_llm_plan(metrics_data)
     if skip:
         logger.warning("[Orchestrator] План без LLM (эвристика): %s", skip_reason)
@@ -346,6 +397,37 @@ def _node_generate_plan(state: OrchestratorState) -> OrchestratorState:
             detail={"plan_id": int(plan["_plan_id"])},
         )
     return {"plan": plan, "plan_id": int(plan["_plan_id"]), "no_plan": False}
+
+
+def _node_policy_guard(state: OrchestratorState) -> OrchestratorState:
+    """
+    PolicyGuardAgent: блокирует risky-планы до announce/apply.
+    """
+    plan = state.get("plan") or {}
+    summary = str(plan.get("summary") or "").lower()
+    blocked_tokens = [
+        "покупаем аккаунт",
+        "покупка аккаунтов",
+        "аренда аккаунтов",
+        "серый обход",
+        "обход модерации",
+    ]
+    hit = next((t for t in blocked_tokens if t in summary), "")
+    blocked = bool(hit)
+    if blocked:
+        plan_id = int(state.get("plan_id") or 0)
+        if plan_id:
+            mark_plan_failed(plan_id)
+        notifier.log_notification(
+            f"PolicyGuard заблокировал план #{plan_id}: {hit}",
+            level="warning",
+            category="plan",
+        )
+    return {
+        "policy_blocked": blocked,
+        "policy_reason": hit,
+        **(_add_outcomes(state, cs.POLICY_GAP) if blocked else {}),
+    }
 
 
 def _node_announce_plan(state: OrchestratorState) -> OrchestratorState:
@@ -523,7 +605,30 @@ def _node_digest(state: OrchestratorState) -> OrchestratorState:
         md.get("shorts_project"),
         md.get("prelend"),
     )
-    return {}
+    kpi = rollout_kpi.record_rollout_kpi(md)
+    notifier.log_notification(
+        f"Rollout KPI: views={kpi['views']} clicks={kpi['clicks']} conv={kpi['conversions']} cr={kpi['cr']:.4f}",
+        category="metric",
+        level="info",
+    )
+    cycle_num = int(state.get("cycle_num") or 0)
+    weekly = {}
+    if cycle_num > 0 and cycle_num % (24 * 7 // max(1, config.CYCLE_INTERVAL_HOURS)) == 0:
+        weekly = {
+            "generated_at": int(time.time()),
+            "focus": "retain+convert+de-risk",
+            "actions": [
+                "Scale hooks with top retention_prediction",
+                "Reduce traffic from high risk_score cohorts",
+                "Promote top experiment winner to default",
+            ],
+        }
+        notifier.log_notification(
+            "WeeklyStrategist: сформирован недельный фокус и 3 действия",
+            category="plan",
+            level="info",
+        )
+    return {"weekly_brief": weekly}
 
 
 def _route_after_preflight(state: OrchestratorState) -> str:
@@ -536,6 +641,10 @@ def _route_after_crash_guard(state: OrchestratorState) -> str:
 
 def _route_after_generate_plan(state: OrchestratorState) -> str:
     return "end" if state.get("no_plan") else "announce"
+
+
+def _route_after_policy_guard(state: OrchestratorState) -> str:
+    return "end" if state.get("policy_blocked") else "announce"
 
 
 def _route_after_announce(state: OrchestratorState) -> str:
@@ -566,10 +675,13 @@ def build_cycle_graph():
     graph = StateGraph(OrchestratorState)
     graph.add_node("preflight", _timed_node("preflight", _node_preflight))
     graph.add_node("collect_metrics", _timed_node("collect_metrics", _node_collect_metrics))
+    graph.add_node("trend_radar", _timed_node("trend_radar", _node_trend_radar))
+    graph.add_node("experiment_agent", _timed_node("experiment_agent", _node_experiment_agent))
     graph.add_node("crash_guard", _timed_node("crash_guard", _node_crash_guard))
     graph.add_node("sp_pipeline", _timed_node("sp_pipeline", _node_sp_pipeline))
     graph.add_node("supply_check", _timed_node("supply_check", _node_supply_check))
     graph.add_node("generate_plan", _timed_node("generate_plan", _node_generate_plan))
+    graph.add_node("policy_guard", _timed_node("policy_guard", _node_policy_guard))
     graph.add_node("announce_plan", _timed_node("announce_plan", _node_announce_plan))
     graph.add_node("wait_before_apply", _timed_node("wait_before_apply", _node_wait_before_apply))
     graph.add_node("apply_config", _timed_node("apply_config", _node_apply_config))
@@ -583,7 +695,9 @@ def build_cycle_graph():
         _route_after_preflight,
         {"collect": "collect_metrics", "end": END},
     )
-    graph.add_edge("collect_metrics", "crash_guard")
+    graph.add_edge("collect_metrics", "trend_radar")
+    graph.add_edge("trend_radar", "experiment_agent")
+    graph.add_edge("experiment_agent", "crash_guard")
     graph.add_conditional_edges(
         "crash_guard",
         _route_after_crash_guard,
@@ -594,6 +708,11 @@ def build_cycle_graph():
     graph.add_conditional_edges(
         "generate_plan",
         _route_after_generate_plan,
+        {"announce": "policy_guard", "end": END},
+    )
+    graph.add_conditional_edges(
+        "policy_guard",
+        _route_after_policy_guard,
         {"announce": "announce_plan", "end": END},
     )
     graph.add_conditional_edges(

@@ -3,6 +3,21 @@
 
 ---
 
+## Сессия 26 (13.04.2026) — Безопасная idempotent-миграция `orchestrator.db` (agent_events)
+
+| Область | Изменение |
+|---------|-----------|
+| **`scripts/migrate_orchestrator_db.py`** | Новый idempotent-скрипт миграции существующей `orchestrator.db`: выравнивает таблицу `agent_events` (добавляет недостающие поля), создаёт индексы `idx_agent_events_created`, `idx_agent_events_creative`, `idx_agent_events_experiment`. |
+| **`db/migrations/2026-04-13_agent_events_registry.sql`** | Добавлен audit SQL-файл миграции реестра агентных событий. |
+| **`MIGRATION_AGENT_EVENTS.md`** | Runbook: backup -> apply -> verify (`PRAGMA table_info/index_list`) для `agent_events`. |
+| **`db/connection.py`** | В `init_db()` добавлен `_migrate_agent_events_registry()` для авто-выравнивания схемы на старых БД при старте Orchestrator. |
+
+**Проверки:**
+- `python -m py_compile scripts/migrate_orchestrator_db.py db/connection.py` — ✅
+- Линтер по изменённым файлам миграции/connection — ✅
+
+---
+
 ## Сессия 25 (06.04.2026) — Миграция funnel/tracking под `vk/rutube/ok`
 
 | Область | Изменение |

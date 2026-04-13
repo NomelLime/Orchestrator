@@ -250,6 +250,8 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         "shave_suspects":     [],
         "analyst_verdicts":   {},
         "analyst_verdicts_count": 0,
+        "hook_metrics": {},
+        "risk_metrics": {},
         "traffic_alive":      None,
         "last_click_ago_sec": None,
         "_unreachable":       True,
@@ -267,6 +269,8 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         return _empty
 
     data = client.get_metrics(period_hours=period_hours)
+    hook_data = client.get_hook_metrics(period_hours=max(24, period_hours * 3))
+    risk_data = client.get_risk_metrics(period_hours=max(24, period_hours * 3))
     if not data or data.get("error") == "unreachable":
         logger.warning("[Tracking] PreLend API вернул пустой ответ — PL метрики обнулены")
         return _empty
@@ -288,6 +292,8 @@ def collect_prelend_snapshot(period_hours: int = 24) -> Dict[str, Any]:
         ],
         "analyst_verdicts":   data.get("analyst_verdicts", {}),
         "analyst_verdicts_count": len(data.get("analyst_verdicts", {}) or {}),
+        "hook_metrics":       hook_data if isinstance(hook_data, dict) else {},
+        "risk_metrics":       risk_data if isinstance(risk_data, dict) else {},
         "traffic_alive":      _safe_primitive(health.get("traffic_alive")),
         "last_click_ago_sec": _safe_primitive(health.get("last_click_ago_sec")),
         "_unreachable":       False,
